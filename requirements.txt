@@ -1,0 +1,6 @@
+langgraph>=1.0.0
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
+supabase>=2.0.0
+python-dotenv>=1.0.0
+pgvector>=0.3.0
