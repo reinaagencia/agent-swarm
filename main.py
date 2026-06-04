@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Punto de entrada principal — Enjambre de Agentes Superinteligente v2.0.
+"""Punto de entrada principal — Enjambre de Agentes Superinteligente v3.0 (INTELIGENCIA x4).
 
 Uso:
     python main.py
@@ -62,7 +62,7 @@ async def run_swarm(requirement: str) -> dict:
     flash_model = get_current_flash_model()
 
     print("=" * 70)
-    print("  🧠 ENJAMBRE DE AGENTES — Superinteligencia Continua v2.0")
+    print("  🧠 ENJAMBRE DE AGENTES — Superinteligencia Continua v3.0 (INTELIGENCIA x4)")
     print("=" * 70)
     from src.config import get_fallback_level, get_fallback_name
     
@@ -261,7 +261,7 @@ def verify_config():
     import os
 
     print("=" * 70)
-    print("  🧠 VERIFICACIÓN — Enjambre Superinteligente v2.0")
+    print("  🧠 VERIFICACIÓN — Enjambre Superinteligente v3.0")
     print("=" * 70)
     print(f"  🔧 Flash default: {OPENCODE_MODEL_FREE} (Zen)")
     print(f"  🔧 Flash fallback: {OPENCODE_MODEL_PAID} (Go)")

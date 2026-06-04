@@ -1,5 +1,9 @@
 """🧠 Model Router Inteligente — Escalado quirúrgico flash↔pro.
 
+FUENTE DE VERDAD UNIFICADA:
+  Este archivo y ~/.agents/skills/model-router/SKILL.md son la MISMA source of truth.
+  Si modificas uno, actualiza el otro.
+
 Estrategia:
   - Flash (gratis) → 95% del trabajo: generación, análisis, testing rutinario
   - Pro (pago, $) → 5% estratégico: desbloqueo de loops, auditoría crítica,
