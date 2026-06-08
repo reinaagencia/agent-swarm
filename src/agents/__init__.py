@@ -10,11 +10,13 @@ Agentes disponibles:
     - arquitecto:     Diseño de sistemas, blueprints JSON ✅ Fase 3
     - programador:    Generación de código + verificación bash ✅ Fase 3
     - tester:         QA — pytest real + análisis LLM ✅ Fase 3
+    - desplegador:    DevOps — Railway, Docker, health checks ✅ Fase 5
+    - instalador:     Bootstrap de entornos — venv, pip, npm, .env ✅ Fase 5
     - auditor:        Validación de calidad (pro) ✅ (vía OpenCode subagent)
     - trader:         Análisis financiero ✅ (vía OpenCode subagent)
     - visor:          Análisis multimodal ✅ (vía OpenCode subagent)
-    - extractor:      Destilación de conocimiento (pendiente Fase 5)
-    - desplegador:    Instalación y despliegue multi-cliente (pendiente Fase 5)
+    - extractor:      Destilación de conocimiento (integrado en pipeline v3)
+    - memoria:        Memoria jerárquica 3-tier ✅ Fase 4
 """
 
 from src.agents.smith import SmithAgent, SessionMemory, SMITH_SYSTEM_PROMPT

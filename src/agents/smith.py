@@ -124,13 +124,26 @@ DELEGATION_MAP = {
     "arquitecto": ["disena", "diseña", "arquitectura", "blueprint", "estructura",
                    "diseño", "diagrama", "patron", "patrón", "modulos", "módulos",
                    "arquitectonico", "arquitectónico"],
-    "programador": ["programa", "codigo", "código", "implementa", "desarrolla",
-                    "crea el archivo", "escribe el codigo", "script", "funcion",
-                    "función", "clase", "api", "endpoint", "refactoriza",
-                    "genera codigo", "genera código"],
+    "programador": ["programa", "implementa", "desarrolla",
+                    "crea el archivo", "escribe el codigo", "escribe código",
+                    "script", "funcion", "función", "clase",
+                    "api", "endpoint", "refactoriza",
+                    "genera codigo", "genera código", "generar codigo"],
     "tester": ["testea", "prueba", "test", "qa", "valida codigo", "valida el codigo",
                "revisa el codigo", "revisa el código", "encuentra bugs", "bug",
-               "depura", "debug", "pytest"],
+               "depura", "debug", "pytest", "analiza el codigo",
+               "analiza el código", "testing", "corre tests", "pasa tests"],
+    "desplegador": ["despliega", "deploy", "deployment", "produccion", "producción",
+                    "subir a produccion", "publica", "release", "lanzar",
+                    "railway", "docker"],
+    "instalador": ["instala", "setup", "bootstrap",
+                   "proyecto nuevo", "nuevo proyecto", "crear un proyecto",
+                   "crea un proyecto", "inicializa proyecto",
+                   "dependencias", "npm install", "pip install",
+                   "venv", "virtualenv", ".env", "requirements.txt",
+                   "configura el proyecto", "configura el entorno",
+                   "prepara el entorno", "scaffold", "entorno de desarrollo",
+                   "desde cero", "proyecto desde"],
     "auditor": ["audita", "valida decision", "valida la decision", "gate",
                 "viabilidad", "critico", "crítico", "supervisa"],
     "trader": ["trading", "acciones", "portafolio", "mercado", "alpaca",
@@ -142,12 +155,26 @@ DELEGATION_MAP = {
 
 def _detect_delegation_target(message: str) -> str | None:
     """Detecta qué agente debe manejar esta tarea. Retorna nombre o None."""
+    import re
     msg_lower = message.lower()
+    # Tokenizar en palabras (solo alfanuméricas + underscore)
+    words = set(re.findall(r'[a-záéíóúüñ0-9_]+', msg_lower))
     
     # Contar matches por agente
     scores = {}
     for agent, keywords in DELEGATION_MAP.items():
-        score = sum(1 for kw in keywords if kw in msg_lower)
+        score = 0
+        for kw in keywords:
+            kw_lower = kw.lower()
+            kw_words = set(re.findall(r'[a-záéíóúüñ0-9_]+', kw_lower))
+            # Si el keyword tiene 1-2 palabras, buscar como palabras exactas
+            if len(kw_words) <= 2:
+                if kw_words.issubset(words):
+                    score += 1
+            else:
+                # Keywords más largas: substring normal
+                if kw in msg_lower:
+                    score += 1
         if score > 0:
             scores[agent] = score
     
@@ -360,12 +387,14 @@ Eres un agente independiente, NO un pipeline. Tu trabajo es:
 2. Decidir si puedes responder tu mismo o delegar a un especialista via task()
 3. Sintetizar los resultados de forma clara y accionable
 
-## Agentes Especialistas (Fase 3-4 — Independientes)
+## Agentes Especialistas (Fase 3-5 — Independientes)
 - **estratega**: Planificacion multi-paso con MoA. Descompone tareas complejas. (Fase 4)
 - **investigador**: Busqueda RAG en Supabase (pgvector). Recupera conocimiento previo.
 - **arquitecto**: Diseno de sistemas, blueprints JSON, estructura de archivos.
 - **programador**: Generacion de codigo + verificacion bash-native. Auto-corrige errores.
 - **tester**: QA — pytest real + analisis LLM en paralelo. Clasifica errores.
+- **desplegador**: DevOps — deploy a Railway, Docker, health checks. (Fase 5)
+- **instalador**: Bootstrap de entornos — venv, pip, npm, .env, Supabase. (Fase 5)
 
 ## Agentes de Supervision y Especializados
 - **auditor**: Validacion de calidad con DeepSeek V4 Pro (solo decisiones criticas).
@@ -395,4 +424,4 @@ Eres un agente independiente, NO un pipeline. Tu trabajo es:
 ## Personalidad
 Directo y eficiente, profesional sin ser robotico, honesto sobre limitaciones y costos."""
 
-SMITH_GREETING = "Smith 1.0 listo. Orquestador del Enjambre 4.0. Fases 3-4 activas: 5 agentes independientes + estratega MoA."
+SMITH_GREETING = "Smith 1.0 listo. Orquestador del Enjambre 4.0. 10 agentes: estratega + dev(5) + ops(2) + especial(3)."
