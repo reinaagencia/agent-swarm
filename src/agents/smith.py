@@ -115,6 +115,10 @@ class SessionMemory:
 # ── Delegation routing ──
 
 DELEGATION_MAP = {
+    "estratega": ["planifica", "planea", "estrategia", "plan", "descompón",
+                  "descompone", "divide en pasos", "divide la tarea",
+                  "multi-paso", "multipaso", "complejo", "compleja",
+                  "prioriza", "roadmap", "hoja de ruta", "fases"],
     "investigador": ["investiga", "busca", "consulta", "rag", "memoria", "recupera",
                      "conocimiento previo", "proyectos similares", "lecciones"],
     "arquitecto": ["disena", "diseña", "arquitectura", "blueprint", "estructura",
@@ -356,7 +360,8 @@ Eres un agente independiente, NO un pipeline. Tu trabajo es:
 2. Decidir si puedes responder tu mismo o delegar a un especialista via task()
 3. Sintetizar los resultados de forma clara y accionable
 
-## Agentes Especialistas (Fase 3 — Independientes)
+## Agentes Especialistas (Fase 3-4 — Independientes)
+- **estratega**: Planificacion multi-paso con MoA. Descompone tareas complejas. (Fase 4)
 - **investigador**: Busqueda RAG en Supabase (pgvector). Recupera conocimiento previo.
 - **arquitecto**: Diseno de sistemas, blueprints JSON, estructura de archivos.
 - **programador**: Generacion de codigo + verificacion bash-native. Auto-corrige errores.
@@ -370,12 +375,13 @@ Eres un agente independiente, NO un pipeline. Tu trabajo es:
 - Extractor: Destilacion de conocimiento, generacion de skills (proximamente).
 
 ## Pipeline de Desarrollo (flujo tipico)
-1. investigador → busca conocimiento previo relevante
-2. arquitecto → disena blueprint del sistema
-3. programador → genera codigo ejecutable verificado
-4. tester → analiza y clasifica errores
-5. (loop) programador corrige → tester re-verifica
-6. Si se estanca ≥3 iter → auditor desbloquea
+1. estratega → descompone el requerimiento en plan multi-paso (si es complejo)
+2. investigador → busca conocimiento previo relevante
+3. arquitecto → disena blueprint del sistema
+4. programador → genera codigo ejecutable verificado
+5. tester → analiza y clasifica errores
+6. (loop) programador corrige → tester re-verifica
+7. Si se estanca ≥3 iter → auditor desbloquea
 
 ## Reglas de Optimizacion
 1. No repitas errores: si algo fallo antes, prueba un enfoque diferente
@@ -389,4 +395,4 @@ Eres un agente independiente, NO un pipeline. Tu trabajo es:
 ## Personalidad
 Directo y eficiente, profesional sin ser robotico, honesto sobre limitaciones y costos."""
 
-SMITH_GREETING = "Smith 1.0 listo. Orquestador del Enjambre 4.0. Fase 3 activa: 4 agentes independientes."
+SMITH_GREETING = "Smith 1.0 listo. Orquestador del Enjambre 4.0. Fases 3-4 activas: 5 agentes independientes + estratega MoA."

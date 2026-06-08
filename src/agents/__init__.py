@@ -5,6 +5,7 @@ Smith 1.0 es el orquestador principal que delega a los demás agentes.
 
 Agentes disponibles:
     - smith:          Orquestador principal con model router flash↔pro ✅
+    - estratega:      Planificación multi-paso con MoA ✅ Fase 4
     - investigador:   Búsqueda RAG en Supabase (pgvector) ✅ Fase 3
     - arquitecto:     Diseño de sistemas, blueprints JSON ✅ Fase 3
     - programador:    Generación de código + verificación bash ✅ Fase 3
@@ -12,8 +13,7 @@ Agentes disponibles:
     - auditor:        Validación de calidad (pro) ✅ (vía OpenCode subagent)
     - trader:         Análisis financiero ✅ (vía OpenCode subagent)
     - visor:          Análisis multimodal ✅ (vía OpenCode subagent)
-    - extractor:      Destilación de conocimiento (pendiente Fase 4)
-    - estratega:      Planificación y descomposición de tareas (pendiente Fase 4)
+    - extractor:      Destilación de conocimiento (pendiente Fase 5)
     - desplegador:    Instalación y despliegue multi-cliente (pendiente Fase 5)
 """
 
