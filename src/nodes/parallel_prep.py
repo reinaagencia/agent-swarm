@@ -11,6 +11,7 @@ from src.state import TeamState
 from src.nodes.investigator import investigator_node
 from src.nodes.skill_resolver import skill_resolver_node
 from src.lessons_engine import get_lessons_context, generate_business_rules
+from src.token_juice import compress
 
 
 async def parallel_prep_node(state: TeamState) -> dict:
@@ -91,6 +92,17 @@ async def parallel_prep_node(state: TeamState) -> dict:
         inv_result.get("messages", []) +
         skill_result.get("messages", [])
     )
+
+    # 🧃 TOKENJUICE: comprimir la memoria recuperada antes de enviar al LLM
+    raw_memory = merged["retrieved_memory"]
+    if len(raw_memory) > 500:
+        compressed_memory, juice_report = compress(raw_memory, max_tokens=2000)
+        if juice_report["compressed"]:
+            merged["retrieved_memory"] = compressed_memory
+            merged["token_juice_report"] = juice_report
+            print(f"[ParallelPrep] 🧃 TokenJuice: {juice_report['tokens_before']}→"
+                  f"{juice_report['tokens_after']} tokens "
+                  f"({juice_report['saved_pct']}% ahorro en RAG context)")
 
     print(f"[ParallelPrep] Completo: "
           f"memoria={len(merged['retrieved_memory'])} chars, "

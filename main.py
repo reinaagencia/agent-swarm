@@ -120,6 +120,15 @@ async def run_swarm(requirement: str) -> dict:
     try:
         final_state = await graph.ainvoke(initial_state)
 
+        # 🧃 TokenJuice: Log de estadísticas de compresión
+        from src.token_juice import get_stats as get_juice_stats
+        juice_stats = get_juice_stats()
+        if juice_stats.total_calls > 0:
+            print(f"\n🧃 [TokenJuice] Ahorro total: "
+                  f"{juice_stats.total_tokens_before}→{juice_stats.total_tokens_after} tokens "
+                  f"({juice_stats.overall_savings_pct}% ahorro) | "
+                  f"{juice_stats.total_calls} compresiones")
+
         # Registrar en benchmark
         record_run(final_state, start_time)
         
