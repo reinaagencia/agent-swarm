@@ -112,17 +112,52 @@ class SessionMemory:
         return context
 
 
-DELEGATION_KEYWORDS = [
-    "investiga", "programa", "codigo", "testea",
-    "disena", "arquitectura", "analiza", "audita", "valida",
-    "extrae", "aprende", "genera skill", "despliega", "instala",
-    "trading", "acciones", "portafolio", "mercado",
-    "imagen", "captura", "video", "audio",
-]
+# ── Delegation routing ──
+
+DELEGATION_MAP = {
+    "investigador": ["investiga", "busca", "consulta", "rag", "memoria", "recupera",
+                     "conocimiento previo", "proyectos similares", "lecciones"],
+    "arquitecto": ["disena", "diseña", "arquitectura", "blueprint", "estructura",
+                   "diseño", "diagrama", "patron", "patrón", "modulos", "módulos",
+                   "arquitectonico", "arquitectónico"],
+    "programador": ["programa", "codigo", "código", "implementa", "desarrolla",
+                    "crea el archivo", "escribe el codigo", "script", "funcion",
+                    "función", "clase", "api", "endpoint", "refactoriza",
+                    "genera codigo", "genera código"],
+    "tester": ["testea", "prueba", "test", "qa", "valida codigo", "valida el codigo",
+               "revisa el codigo", "revisa el código", "encuentra bugs", "bug",
+               "depura", "debug", "pytest"],
+    "auditor": ["audita", "valida decision", "valida la decision", "gate",
+                "viabilidad", "critico", "crítico", "supervisa"],
+    "trader": ["trading", "acciones", "portafolio", "mercado", "alpaca",
+               "financiero", "inversion", "inversión", "stock", "etf"],
+    "visor": ["imagen", "captura", "video", "audio", "multimodal",
+              "foto", "screenshot", "pdf visual", "grafico", "gráfico"],
+}
+
+
+def _detect_delegation_target(message: str) -> str | None:
+    """Detecta qué agente debe manejar esta tarea. Retorna nombre o None."""
+    msg_lower = message.lower()
+    
+    # Contar matches por agente
+    scores = {}
+    for agent, keywords in DELEGATION_MAP.items():
+        score = sum(1 for kw in keywords if kw in msg_lower)
+        if score > 0:
+            scores[agent] = score
+    
+    if not scores:
+        return None
+    
+    # El agente con más matches gana
+    best = max(scores, key=scores.get)
+    return best
 
 
 def _detect_delegation(message: str) -> bool:
-    return any(kw in message.lower() for kw in DELEGATION_KEYWORDS)
+    """Detecta si el mensaje requiere delegación a algún agente especializado."""
+    return _detect_delegation_target(message) is not None
 
 
 class SmithAgent:
@@ -261,7 +296,8 @@ class SmithAgent:
 
     async def _delegate(self, message: str, context: str,
                        decision: RouterDecision) -> dict:
-        self.memory.add_to_scratchpad(f"Delegando: {message[:100]}...")
+        target = _detect_delegation_target(message) or "general"
+        self.memory.add_to_scratchpad(f"Delegando a {target}: {message[:100]}...")
         if len(context) > 1000:
             context, juice_report = compress(context, max_tokens=1500)
             self.memory.add_to_scratchpad(
@@ -272,7 +308,8 @@ class SmithAgent:
                 model=decision.tier.value,
                 max_tokens=TOKEN_BUDGET[decision.tier]["max_output"])
         result = await self._fallback_pipeline(message, context, decision)
-        self.memory.add_to_scratchpad("Delegacion completada")
+        self.memory.add_to_scratchpad(f"Delegacion a {target} completada")
+        result["delegation_target"] = target
         return result
 
     async def _fallback_pipeline(self, message: str, context: str,
@@ -316,29 +353,40 @@ SMITH_SYSTEM_PROMPT = """Eres Smith, el orquestador principal del Enjambre 4.0.
 ## Tu Rol
 Eres un agente independiente, NO un pipeline. Tu trabajo es:
 1. Analizar lo que el usuario necesita
-2. Decidir si puedes responder tu mismo o delegar a un especialista
+2. Decidir si puedes responder tu mismo o delegar a un especialista via task()
 3. Sintetizar los resultados de forma clara y accionable
 
-## Agentes Especialistas
-- Investigador: Busqueda profunda, investigacion multi-fuente, RAG
-- Arquitecto: Diseno de sistemas, blueprints, decisiones tecnicas
-- Programador: Generacion de codigo, implementacion
-- Tester: QA, validacion, pruebas
-- Auditor: Validacion de calidad (solo para decisiones criticas)
-- Estratega: Planificacion, descomposicion de tareas complejas
-- Trader: Analisis financiero, mercados
-- Visor: Analisis visual/multimodal
-- Extractor: Destilacion de conocimiento, generacion de skills
+## Agentes Especialistas (Fase 3 — Independientes)
+- **investigador**: Busqueda RAG en Supabase (pgvector). Recupera conocimiento previo.
+- **arquitecto**: Diseno de sistemas, blueprints JSON, estructura de archivos.
+- **programador**: Generacion de codigo + verificacion bash-native. Auto-corrige errores.
+- **tester**: QA — pytest real + analisis LLM en paralelo. Clasifica errores.
+
+## Agentes de Supervision y Especializados
+- **auditor**: Validacion de calidad con DeepSeek V4 Pro (solo decisiones criticas).
+- **trader**: Analisis financiero, mercados, Alpaca.
+- **visor-multimodal**: Analisis visual/auditivo con MiMo V2.5.
+- Estratega: Planificacion, descomposicion de tareas complejas (proximamente).
+- Extractor: Destilacion de conocimiento, generacion de skills (proximamente).
+
+## Pipeline de Desarrollo (flujo tipico)
+1. investigador → busca conocimiento previo relevante
+2. arquitecto → disena blueprint del sistema
+3. programador → genera codigo ejecutable verificado
+4. tester → analiza y clasifica errores
+5. (loop) programador corrige → tester re-verifica
+6. Si se estanca ≥3 iter → auditor desbloquea
 
 ## Reglas de Optimizacion
 1. No repitas errores: si algo fallo antes, prueba un enfoque diferente
 2. Presupuesto consciente: usa pro solo cuando aporte valor real
 3. Contexto comprimido: TokenJuice optimiza el contexto antes de cada llamada
-4. Paralelo cuando puedas: si necesitas multiples agentes, llámalos simultaneamente
+4. Paralelo cuando puedas: investigador + arquitecto pueden correr juntos
 5. Scratchpad activo: mantén registro de lo que funciona y lo que no
 6. Dedup inteligente: si el usuario repite una pregunta, usa la respuesta cacheada
+7. **Delega via task()**: usa task(subagent_type="programador", ...) para cada agente
 
 ## Personalidad
 Directo y eficiente, profesional sin ser robotico, honesto sobre limitaciones y costos."""
 
-SMITH_GREETING = "Smith 1.0 listo. Orquestador del Enjambre 4.0."
+SMITH_GREETING = "Smith 1.0 listo. Orquestador del Enjambre 4.0. Fase 3 activa: 4 agentes independientes."
