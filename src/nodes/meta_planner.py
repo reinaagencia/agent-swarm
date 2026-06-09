@@ -167,23 +167,40 @@ Considera el dominio, la complejidad real, los riesgos, y cómo optimizar el pip
         }
         print(f"[Meta-Planner] ⚠️ Error parseando JSON, usando valores por defecto")
 
-    # Determinar si ensemble está activo
+    # ── Determinar si el requerimiento es viable (fusión con Gate 1) ──
     router_config = plan.get("configuracion_router", {})
     usar_ensemble = router_config.get("usar_ensemble_arquitectura", False)
     pro_active = router_config.get("pro_active_desde_inicio", False)
     
+    # El Meta-Planner también emite veredicto de viabilidad (ahorra Gate 1)
+    riesgos = plan.get("riesgos_criticos", [])
+    riesgos_altos = [r for r in riesgos if r.get("impacto") == "alto"]
+    es_viable = len(riesgos_altos) < 2  # Máximo 1 riesgo alto permitido
+    confianza = plan.get("confianza_en_estimacion", 0.7)
+    
+    auditor_review = {
+        "approved": es_viable,
+        "risk": "high" if len(riesgos_altos) >= 2 else ("medium" if riesgos_altos else "low"),
+        "flags": [r.get("riesgo", "") for r in riesgos_altos[:3]],
+        "confidence": confianza,
+        "source": "meta_planner_fused",  # Indica que viene del Gate 0 fusionado
+    }
+    
     audit_entry = {
-        "nodo": "Meta-Planner (Pro)",
-        "accion": "Análisis profundo del requerimiento (Gate 0)",
+        "nodo": "Meta-Planner FUSED (Pro)",
+        "accion": "Análisis + validación de viabilidad (Gate 0+1 fusionados)",
         "resultado": f"Dominio: {plan.get('dominio', 'N/A')} | "
                      f"Complejidad: {plan.get('complejidad_estimada', 'N/A')} | "
-                     f"Ensemble: {'SÍ' if usar_ensemble else 'NO'} | "
+                     f"Viable: {'SÍ' if es_viable else 'NO'} | "
                      f"Pro activo: {'SÍ' if pro_active else 'NO'}",
     }
 
     return {
         "meta_plan": plan,
+        "auditor_review": auditor_review,  # Reemplaza Gate 1
+        "meta_planner_fused": True,  # Flag para saltar Gate 1
         "scratchpad": [
+            f"[Meta-Planner FUSED] Viable: {es_viable} | Riesgo: {auditor_review['risk']} | Confianza: {confianza}",
             f"[Meta-Planner] Plan maestro: {json.dumps(plan, ensure_ascii=False)[:300]}",
         ],
         "audit_trail": [audit_entry],

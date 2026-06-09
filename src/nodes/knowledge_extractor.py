@@ -16,8 +16,8 @@ from src.config import get_llm, TEMPERATURE_DEFAULT, safe_invoke, get_budget, ge
 from src.supabase_utils import save_to_memory
 from src.metrics import record_run
 from src.cache import invalidate_cache
-from src.skill_generator import check_and_generate
-from src.tuner import auto_tune
+# SKip: skill_generator eliminado (P0: simplificación x10)
+# Skip: auto_tune eliminado (P0: overhead innecesario)
 
 
 EXTRACTOR_PROMPT = """Eres el Extractor de Conocimiento del Enjambre.
@@ -151,23 +151,8 @@ Genera un resumen de conocimiento para la memoria del sistema."""
 
     print(f"[Extractor] Métricas registradas: {task_type}, {iterations} iter, {len(source_code)} archivos")
 
-    # ── Auto-generación de skills si hay patrón repetido (Fase 4) ──
-    nuevas_skills = check_and_generate()
-    if nuevas_skills:
-        print(f"[Extractor] 🆕 Skills auto-generadas: {', '.join(nuevas_skills)}")
-        result_scratchpad = [f"[Extractor] Skills auto-generadas: {', '.join(nuevas_skills)}"]
-    else:
-        result_scratchpad = []
-
-    # ── Auto-tuning: ajustar budgets según rendimiento histórico (Fase 5) ──
-    try:
-        tuning_result = auto_tune()
-        if tuning_result.get("ajustes_realizados"):
-            result_scratchpad.append(
-                f"[Tuner] Auto-ajuste: {len(tuning_result['ajustes_realizados'])} cambios"
-            )
-    except Exception as e:
-        print(f"[Tuner] ⚠️ Error en auto-tuning: {e}")
+    # SkillGenerator y AutoTuner eliminados (P0: simplificación x10)
+    result_scratchpad = []
     
     # ── Model Router: aprender de la ejecución (señal preliminar) ──
     try:

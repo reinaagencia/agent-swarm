@@ -206,11 +206,57 @@ def _parse_pytest_output(output: str) -> list[dict]:
     return errors[:5]
 
 
+def _auto_install_deps(output: str, tmpdir: str) -> list[str]:
+    """Detecta módulos faltantes en output de pytest y los instala automáticamente.
+    
+    Parsea ModuleNotFoundError/ImportError e intenta pip install.
+    Retorna lista de paquetes instalados.
+    """
+    installed = []
+    for match in re.finditer(r"ModuleNotFoundError:\s*No module named ['\"](.+?)['\"]", output):
+        package = match.group(1)
+        # Mapear nombres de import a paquetes pip conocidos
+        pip_map = {
+            "openpyxl": "openpyxl",
+            "pandas": "pandas",
+            "flask": "Flask",
+            "fastapi": "fastapi",
+            "sqlalchemy": "sqlalchemy",
+            "pydantic": "pydantic",
+            "httpx": "httpx",
+            "uvicorn": "uvicorn",
+            "pytest": "pytest",
+            "pytest_asyncio": "pytest-asyncio",
+            "pytest_httpserver": "pytest-httpserver",
+            "requests": "requests",
+            "dotenv": "python-dotenv",
+            "yaml": "pyyaml",
+        }
+        pip_pkg = pip_map.get(package, package)
+        
+        try:
+            print(f"    [AutoInstall] Instalando {pip_pkg}...")
+            r = subprocess.run(
+                [sys.executable, "-m", "pip", "install", pip_pkg, "-q"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r.returncode == 0:
+                installed.append(pip_pkg)
+                print(f"    [AutoInstall] ✅ {pip_pkg} instalado")
+            else:
+                print(f"    [AutoInstall] ⚠️ No se pudo instalar {pip_pkg}: {r.stderr[:100]}")
+        except Exception as e:
+            print(f"    [AutoInstall] ⚠️ Error instalando {pip_pkg}: {e}")
+    
+    return installed
+
+
 def _run_pytest_real(source_code: dict) -> dict:
     """Ejecuta pytest real sobre el código generado.
     
     Escribe archivos a directorio temporal y ejecuta pytest.
     Retorna errores detallados con tracebacks parseados.
+    Incluye auto-instalación de dependencias faltantes.
     """
     if not source_code:
         return {"status": "FAIL", "errors": ["No hay código para testear"], "output": ""}
@@ -235,6 +281,23 @@ def _run_pytest_real(source_code: dict) -> dict:
 
             if result.returncode == 0:
                 return {"status": "PASS", "errors": [], "output": output}
+
+            # ── Auto-install de dependencias faltantes ──
+            installed = _auto_install_deps(output, tmpdir)
+            if installed:
+                # Re-ejecutar pytest después de instalar dependencias
+                print(f"    [AutoInstall] Re-ejecutando pytest tras instalar {len(installed)} paquetes...")
+                try:
+                    result = subprocess.run(
+                        [sys.executable, "-m", "pytest", tmpdir, "-v", "--tb=long", "-q"],
+                        capture_output=True, text=True, timeout=60,
+                    )
+                    output = result.stdout + result.stderr
+                    if result.returncode == 0:
+                        print(f"    [AutoInstall] ✅ Tests pasan después de instalar dependencias")
+                        return {"status": "PASS", "errors": [], "output": output}
+                except subprocess.TimeoutExpired:
+                    pass
 
             # Parsear errores del output de pytest
             parsed_errors = _parse_pytest_output(output)

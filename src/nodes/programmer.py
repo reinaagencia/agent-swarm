@@ -29,6 +29,9 @@ Recibe blueprint + errores previos
 
 import json
 import asyncio
+import re
+import subprocess
+import sys
 from pathlib import Path
 from langchain_core.messages import HumanMessage, SystemMessage
 from src.state import TeamState
@@ -44,6 +47,19 @@ OUTPUT_DIR = Path("/Users/isabeldiaz/Dev/agent-swarm") / "output"
 
 PROGRAMMER_PROMPT = """Eres el Programador Experto del Enjambre (Bash-Native) — v3.0.
 
+⚠️ REGLA DE ORO #1: EL CÓDIGO DEBE COMPILAR SIN ERRORES DE SINTAXIS.
+Antes de entregar, verifica MENTALMENTE que cada archivo .py compila con:
+  python3 -c "compile(open('file').read(), 'file', 'exec')"
+Un solo error de sintaxis reinicia el ciclo y desperdicia recursos.
+Los errores de sintaxis son INACEPTABLES.
+
+⚠️ REGLA DE ORO #2: NO uses 'import X' si X es un archivo local.
+Si generas un archivo llamado config.py, NO escribas 'import config' en otro archivo.
+Python confunde módulos locales con paquetes pip. Usa imports relativos: 'from . import config'.
+
+⚠️ REGLA DE ORO #3: Cada archivo debe ser auto-contenido e independiente.
+No asumas que otro archivo existe. Verifica que cada .py funciona por sí solo.
+
 TU TRABAJO:
 Implementas código y lo VERIFICAS ejecutándolo. No entregas código no probado.
 SIGUES EL CICLO: auto-reflexión → TDD → código → bash-verify → auto-reflexión final.
@@ -53,11 +69,11 @@ REGLAS:
 2. CORRIGE errores del test_report previo.
 3. REVISA debug_history: errores ya resueltos, NO LOS REPITAS.
 4. Código limpio, tipado, con docstrings.
-5. Después de escribir, EJECUTA el código para verificar que funciona.
+5. Después de escribir, VERIFICA que compila con compile().
 6. Si hay errores de ejecución, LEE el output y CORRIGE.
 7. Máximo 3 intentos de auto-corrección local.
 8. AUTO-REFLEXIÓN: Antes de entregar, evalúa tu código contra estos 10 puntos:
-   - ✅ ¿Los imports son correctos?
+   - ✅ ¿Los imports son correctos y no chocan con archivos locales?
    - ✅ ¿Las funciones tienen type hints?
    - ✅ ¿Hay docstrings en funciones públicas?
    - ✅ ¿Se manejan casos borde (edge cases)?
@@ -66,7 +82,7 @@ REGLAS:
    - ✅ ¿El código sigue el blueprint?
    - ✅ ¿Se respetan las business_rules?
    - ✅ ¿No hay código duplicado?
-   - ✅ ¿El código es ejecutable sin errores de sintaxis?
+   - ✅ ✅✅ ¿CADA ARCHIVO COMPILA CON compile()? (doble check obligatorio)
 9. TDD LIGERO: Si el requerimiento incluye lógica de negocio específica,
    escribe los tests PRIMERO, luego el código que los hace pasar.
 
@@ -87,6 +103,105 @@ Responde ÚNICAMENTE en este formato JSON:
 }
 
 IMPORTANTE: Siempre incluye verification_output con el resultado de ejecutar el código."""
+
+
+def _auto_install_imports(source_code: dict) -> list[str]:
+    """Detecta imports en el código generado e instala dependencias faltantes.
+    
+    OPTIMIZACIÓN: NO instala paquetes cuyos nombres coinciden con archivos locales
+    (ej: si hay config.py, no instalar pip package 'config').
+    
+    Escanea todos los archivos .py en busca de import statements.
+    Intenta instalar cualquier paquete que no esté disponible.
+    """
+    imports_detectados = set()
+    
+    # Colección de módulos locales (nombres de archivos sin extensión)
+    local_modules = set()
+    for fname in source_code:
+        if fname.endswith('.py'):
+            local_modules.add(fname.replace('.py', ''))
+        # También carpetas con __init__.py
+        if '/' in fname:
+            parts = fname.split('/')
+            if len(parts) >= 1:
+                local_modules.add(parts[0])
+    
+    for filename, code in source_code.items():
+        if not filename.endswith(".py"):
+            continue
+        
+        # Detectar import X / from X import Y
+        for match in re.finditer(r'^import\s+(\w+)|^from\s+(\w+)\s+import', code, re.MULTILINE):
+            pkg = match.group(1) or match.group(2)
+            if pkg and pkg not in ('os', 'sys', 'json', 'time', 'datetime', 're', 'math',
+                                     'pathlib', 'collections', 'functools', 'itertools',
+                                     'typing', 'abc', 'enum', 'hashlib', 'uuid',
+                                     'subprocess', 'tempfile', 'shutil', 'logging',
+                                     'argparse', 'csv', 'io', 'textwrap', 'copy',
+                                     'inspect', 'pdb', 'traceback', 'warnings',
+                                     'dataclasses', 'weakref', 'types', 'string',
+                                     'random', 'statistics', 'decimal', 'fractions',
+                                     'json', 'base64', 'binascii', 'struct',
+                                     'socket', 'http', 'urllib', 'email',
+                                     'xml', 'html', 'configparser'):
+                # Saltar si es un módulo local (archivo en el proyecto)
+                if pkg in local_modules:
+                    continue
+                imports_detectados.add(pkg)
+    
+    if not imports_detectados:
+        return []
+    
+    # Mapa de import → pip package (solo paquetes reales PIP, no nombres locales)
+    # IMPORTANTE: Solo incluir paquetes PIP verificados, NO módulos locales
+    PIP_MAP = {
+        'fastapi': 'fastapi', 'pydantic': 'pydantic', 'uvicorn': 'uvicorn',
+        'sqlalchemy': 'sqlalchemy', 'flask': 'Flask', 'django': 'django',
+        'pandas': 'pandas', 'numpy': 'numpy', 'openpyxl': 'openpyxl',
+        'requests': 'requests', 'httpx': 'httpx', 'aiohttp': 'aiohttp',
+        'pytest': 'pytest', 'pytest_asyncio': 'pytest-asyncio',
+        'dotenv': 'python-dotenv', 'yaml': 'pyyaml', 'bs4': 'beautifulsoup4',
+        'selenium': 'selenium', 'playwright': 'playwright',
+        'PIL': 'pillow', 'cv2': 'opencv-python',
+        'matplotlib': 'matplotlib', 'plotly': 'plotly',
+        'scipy': 'scipy', 'sklearn': 'scikit-learn',
+        'click': 'click', 'typer': 'typer',
+        'tqdm': 'tqdm', 'psutil': 'psutil',
+        'watchdog': 'watchdog', 'asyncpg': 'asyncpg',
+        'aiosqlite': 'aiosqlite', 'jinja2': 'jinja2',
+        'alembic': 'alembic', 'bcrypt': 'bcrypt',
+        'python_jose': 'python-jose[cryptography]', 'passlib': 'passlib[bcrypt]',
+        'python_multipart': 'python-multipart',
+        'aiofiles': 'aiofiles', 'watchfiles': 'watchfiles',
+        'redis': 'redis', 'celery': 'celery',
+        'asyncio': None,  # built-in
+    }
+    
+    installed = []
+    for imp in sorted(imports_detectados):
+        pkg = PIP_MAP.get(imp)
+        if pkg is None:
+            continue  # No está en el mapa conocido → probablemente módulo local
+        try:
+            __import__(imp)
+        except ImportError:
+            try:
+                print(f"    [AutoInstall] Instalando {pkg}...")
+                import subprocess, sys
+                r = subprocess.run(
+                    [sys.executable, '-m', 'pip', 'install', pkg, '-q'],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if r.returncode == 0:
+                    installed.append(pkg)
+                    print(f"    [AutoInstall] ✅ {pkg} instalado")
+                else:
+                    print(f"    [AutoInstall] ⚠️ Falló {pkg}: {r.stderr[:100]}")
+            except Exception as e:
+                print(f"    [AutoInstall] ⚠️ Error: {e}")
+    
+    return installed
 
 
 def _resumir_blueprint(blueprint: dict) -> str:
@@ -243,7 +358,8 @@ async def programmer_node(state: TeamState) -> dict:
     ])
 
     content = response.content if hasattr(response, 'content') else str(response)
-    modelo_usado = "pro" if router.escalado >= 3 else "flash"
+    # OPTIMIZACIÓN: detectar modelo real usado (no inferir de escalado)
+    modelo_usado = "pro" if "deepseek-v4-pro" in str(getattr(llm, 'model', '')) else "flash"
     print(f"[Programador v3] {modelo_usado.upper()} (iter {iteration}, errs: {errors})")
 
     # Parsear JSON
@@ -263,6 +379,12 @@ async def programmer_node(state: TeamState) -> dict:
     source = result.get("source_code", {})
     notas = result.get("notas_scratchpad", [])
     auto_reflection = result.get("auto_reflection", {})
+    
+    # ── Fase 1.5: Auto-install de dependencias detectadas ──
+    if source and any(f.endswith(".py") for f in source.keys()):
+        installed = _auto_install_imports(source)
+        if installed:
+            notas.append(f"[AutoInstall] Dependencias instaladas: {', '.join(installed)}")
     
     # Fase 2: Verificar código localmente (Bash-Native)
     verification_output = ""

@@ -277,9 +277,15 @@ def build_graph() -> StateGraph:
     
     # ── Flujo principal ──
     workflow.add_edge("parallel_prep", "orchestrator")
-    workflow.add_edge("orchestrator", "auditor_gate_1")
+    
+    # OPTIMIZACIÓN P0: Gate 1 se salta si Meta-Planner ya validó viabilidad
+    workflow.add_conditional_edges(
+        "orchestrator",
+        lambda s: "architect" if s.get("meta_planner_fused") else "auditor_gate_1",
+        {"auditor_gate_1": "auditor_gate_1", "architect": "architect"},
+    )
 
-    # Gate 1 → Arquitecto (o END si rechazado)
+    # Gate 1 → Arquitecto (o END si rechazado) — solo si no está fusionado
     workflow.add_conditional_edges(
         "auditor_gate_1",
         should_proceed_after_auditor,
