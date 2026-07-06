@@ -18,6 +18,8 @@ import subprocess
 import logging
 import os
 import signal
+import sys
+import platform
 from pathlib import Path
 from typing import Optional
 
@@ -28,6 +30,25 @@ MAX_OUTPUT_LENGTH = 10000      # Caracteres máximos de output capturado
 DEFAULT_TIMEOUT = 30           # Timeout por defecto en segundos
 BANNED_COMMANDS = ["rm -rf /", "dd if=", ":(){ :|:& };:", "mkfs", "format"]
 MAX_COMMAND_LENGTH = 2000      # Caracteres máximos del comando
+
+# ── Detección de SO ──
+_IS_WINDOWS = platform.system() == "Windows"
+
+def _get_shell() -> str:
+    """Devuelve el ejecutable de shell según el SO.
+    
+    Windows: cmd.exe (compatible con todos los comandos básicos)
+    macOS/Linux: /bin/zsh
+    """
+    if _IS_WINDOWS:
+        return "cmd.exe"
+    return "/bin/zsh"
+
+def _get_python_cmd() -> str:
+    """Devuelve el nombre del comando Python según el SO."""
+    if _IS_WINDOWS:
+        return "python"
+    return "python3"
 
 
 class ExecutionResult:
@@ -106,7 +127,7 @@ async def execute_command(
         if env:
             exec_env.update(env)
         
-        # Ejecutar con timeout
+        # Ejecutar con timeout (compatible Windows/macOS/Linux)
         result = subprocess.run(
             command,
             shell=True,
@@ -115,7 +136,7 @@ async def execute_command(
             timeout=timeout,
             cwd=str(workdir) if workdir else None,
             env=exec_env,
-            executable="/bin/zsh",
+            executable=_get_shell(),
         )
         
         success = result.returncode == 0
@@ -175,9 +196,12 @@ async def execute_python_code(
     Returns:
         ExecutionResult con stdout/stderr/returncode
     """
-    python_cmd = "python3"
+    python_cmd = _get_python_cmd()
     if venv_path:
-        python_cmd = str(venv_path / "bin" / "python3")
+        if _IS_WINDOWS:
+            python_cmd = str(venv_path / "Scripts" / "python.exe")
+        else:
+            python_cmd = str(venv_path / "bin" / "python3")
     
     command = f"{python_cmd} \"{code_path}\" {args}"
     return await execute_command(command, workdir=workdir, timeout=timeout)
@@ -202,9 +226,12 @@ async def run_pytest(
     Returns:
         ExecutionResult
     """
-    python_cmd = "python3"
+    python_cmd = _get_python_cmd()
     if venv_path:
-        python_cmd = str(venv_path / "bin" / "python3")
+        if _IS_WINDOWS:
+            python_cmd = str(venv_path / "Scripts" / "python.exe")
+        else:
+            python_cmd = str(venv_path / "bin" / "python3")
     
     verbose_flag = "-v" if verbose else ""
     command = f"{python_cmd} -m pytest {verbose_flag} \"{test_path}\" 2>&1"
