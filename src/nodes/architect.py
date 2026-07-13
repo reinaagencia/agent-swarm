@@ -1,19 +1,19 @@
-"""Nodo 3 — Arquitecto V3 con Ensemble Inteligente (INTELIGENCIA x4).
+"""Nodo 3 — Arquitecto V3 con MoA Intelligence Amplifier (INTELIGENCIA x5).
 
-MEJORA v3.0:
-  1. Contexto DINÁMICO: ve 50% del requirement real (vs 300 chars fijo)
-  2. ENSEMBLE: 3 arquitectos flash generan blueprints con enfoques diferentes
-  3. Gate 2 (Pro) elige el MEJOR blueprint de los 3
-  4. Rediseño Pro mejorado con más contexto
+MEJORA TURBO (Julio 2026):
+   1. MoA ENSEMBLE: 3 arquitectos en paralelo con perspectivas diferentes
+   2. MoA Aggregator (deepseek-v4-pro) fusiona/elige el mejor blueprint
+   3. Gate 2 recibe ensemble completo para validación
+   4. Modo eficiente: sin MoA si es tarea simple (baja complejidad)
 
-ARQUITECTURA DEL ENSEMBLE:
+ARQUITECTURA DEL MoA ENSEMBLE:
 ```
-3 Arquitectos Flash (paralelo):
-  A: MINIMALISTA → simple, pocos archivos, funciones compactas
-  B: ROBUSTO → modular, separación de concerns, patrones
-  C: TESTING-FIRST → diseñado para testabilidad
+Proposer 1 (flash): MINIMALISTA → simple, pocos archivos
+Proposer 2 (kimi):  ROBUSTO → modular, patrones, escalable
+Proposer 3 (qwen):  TESTING-FIRST → testabilidad ante todo
 
-Gate 2 (Pro) recibe los 3 y elige/fusiona el mejor blueprint
+Aggregator (deepseek-v4-pro): analiza los 3 y produce blueprint óptimo
+                              o elige el mejor según el contexto
 ```
 """
 
@@ -21,7 +21,8 @@ import json
 import asyncio
 from langchain_core.messages import HumanMessage, SystemMessage
 from src.state import TeamState
-from src.config import get_llm, get_pro_llm, TEMPERATURE_CREATIVE, safe_invoke, get_budget, get_dynamic_limit
+from src.config import get_llm, get_pro_llm, get_kimi_llm, get_deepseek_pro_llm, get_nemotron_llm, TEMPERATURE_CREATIVE, safe_invoke, get_budget, get_dynamic_limit, get_current_complexity
+from src.moa_engine import MoAOrchestrator, MoAConfig, PROPOSER_REGISTRY
 
 
 ARCHITECT_PROMPT = """Eres el Arquitecto de Software del Enjambre — v3.0 (Superinteligente).
@@ -97,8 +98,17 @@ Diseña la arquitectura del proyecto con el enfoque especificado. Responde SOLO 
 
 
 async def _generar_blueprint(state: TeamState, enfoque: str, nombre: str) -> dict:
-    """Genera un blueprint con un enfoque específico."""
-    llm = get_llm(temperature=TEMPERATURE_CREATIVE, max_tokens=get_budget("architect"))
+    """Genera un blueprint con un enfoque específico.
+    
+    Usa Nemotron 3 Ultra Free si el requerimiento es >30K caracteres
+    (aprovecha su RULER 94.7 para contexto largo).
+    """
+    requirement = state.get("user_requirement", "")
+    if len(requirement) > 30000:
+        llm = get_nemotron_llm(temperature=TEMPERATURE_CREATIVE, max_tokens=get_budget("architect"))
+        print(f"[Arquitecto] 🚀 Usando Nemotron (requerimiento: {len(requirement)} chars > 30K)")
+    else:
+        llm = get_llm(temperature=TEMPERATURE_CREATIVE, max_tokens=get_budget("architect"))
     prompt = _build_architect_prompt(state, enfoque)
     
     system_prompt = ARCHITECT_PROMPT.replace("{enfoque}", enfoque)
@@ -153,46 +163,191 @@ def _fusionar_blueprints(blueprints: list) -> dict:
 
 
 async def architect_node(state: TeamState) -> dict:
-    """Arquitecto V3 OPTIMIZADO: 1 arquitecto ROBUSTO (sin Ensemble).
+    """Arquitecto V3 con MoA: 3 proposers en paralelo + aggregator Pro.
     
-    OPTIMIZACIÓN x10: Eliminado Ensemble de 3 arquitectos.
-    Ahora solo usamos el enfoque ROBUSTO que era el mejor en 80% de los casos.
-    Esto reduce el tiempo de arquitectura en 3x (sin paralelo innecesario).
+    ESTRATEGIA MoA:
+      Para tareas medium/high: activa MoA completo (3 proposers + aggregator Pro)
+      Para tareas low: usa single-pass ROBUSTO (ahorro de tokens)
+    
+    PROPOSERS:
+      - flash (MINIMALISTA): solución simple y directa
+      - kimi (ROBUSTO): modular, patrones, escalable  
+      - qwen (TESTING-FIRST): diseñado para testabilidad
+    
+    AGGREGATOR:
+      - deepseek-v4-pro: sintetiza/elige el mejor blueprint
     """
-    print(f"[Arquitecto v3] 🚀 Generando blueprint ROBUSTO (single-pass)...")
+    complexity = get_current_complexity()
     
-    # Enfoque único: ROBUSTO (el mejor en 80% de los casos según benchmarks)
-    enfoque_robusto = (
-        "ROBUSTO", 
-        "Solución completa y modular. Separación de concerns, patrones de diseño. "
-        "Código mantenible y extensible. Prioriza claridad y testabilidad."
-    )
+    # Decidir si usar MoA completo o single-pass
+    usar_moa = complexity in ("medium", "high")
     
-    # Generar 1 solo blueprint (sin Ensemble)
-    resultado = await _generar_blueprint(state, enfoque_robusto[1], enfoque_robusto[0])
+    if not usar_moa:
+        # Modo eficiente: single-pass ROBUSTO (tareas simples)
+        print(f"[Arquitecto v3] 📐 Tarea simple ({complexity}) — single-pass ROBUSTO")
+        enfoque = (
+            "ROBUSTO", 
+            "Solución completa y modular. Separación de concerns, patrones de diseño. "
+            "Código mantenible y extensible."
+        )
+        resultado = await _generar_blueprint(state, enfoque[1], enfoque[0])
+        
+        blueprint_final = resultado.get("blueprint", {})
+        notas = resultado.get("notas", [])
+        
+        if not resultado.get("valido"):
+            enfoque_min = ("MINIMALISTA", "Solución simple y directa.")
+            resultado2 = await _generar_blueprint(state, enfoque_min[1], enfoque_min[0])
+            blueprint_final = resultado2.get("blueprint", {})
+            notas = resultado2.get("notas", [])
+        
+        return {
+            "architecture_blueprint": blueprint_final,
+            "scratchpad": notas,
+            "audit_trail": [{
+                "nodo": "Arquitecto v3 (single-pass)",
+                "accion": "1 blueprint ROBUSTO (sin MoA)",
+                "resultado": f"{len(blueprint_final.get('archivos', {}))} archivos",
+            }],
+            "ensemble_blueprints": [],
+        }
     
-    blueprint_final = resultado.get("blueprint", {})
-    notas = resultado.get("notas", [])
+    # ── MoA completo para tareas medium/high ──
+    print(f"[Arquitecto v3] 🧠 MoA ACTIVADO ({complexity}) — 3 blueprints en paralelo + aggregator Pro")
     
-    # Si falló el ROBUSTO, reintentar con MINIMALISTA como fallback
-    if not resultado.get("valido"):
-        print(f"[Arquitecto v3] ⚠️ ROBUSTO falló, usando MINIMALISTA...")
-        enfoque_min = ("MINIMALISTA", "Solución simple y directa.")
-        resultado2 = await _generar_blueprint(state, enfoque_min[1], enfoque_min[0])
-        blueprint_final = resultado2.get("blueprint", {})
-        notas = resultado2.get("notas", [])
+    # Generar 3 blueprints con diferentes enfoques en paralelo
+    enfoques = [
+        ("MINIMALISTA", "Solución simple y directa. Pocos archivos, funciones compactas. Enfoque práctico."),
+        ("ROBUSTO", "Solución completa y modular. Separación de concerns, patrones de diseño. Código mantenible."),
+        ("TESTING-FIRST", "Diseñado para testabilidad. Mockeable, inyección de dependencias,边界 casos."),
+    ]
+    
+    tasks = [
+        _generar_blueprint(state, enfoque[1], enfoque[0])
+        for enfoque in enfoques
+    ]
+    
+    blueprints = await asyncio.gather(*tasks)
+    validos = [b for b in blueprints if b.get("valido")]
+    
+    # Extraer blueprints para ensemble
+    ensemble = []
+    for b in validos:
+        bp = b.get("blueprint", {})
+        if bp and bp.get("archivos"):
+            ensemble.append({
+                "nombre": b.get("nombre", "?"),
+                "enfoque": b.get("enfoque", "")[:50],
+                "archivos": list(bp.get("archivos", {}).keys())[:8],
+                "num_archivos": len(bp.get("archivos", {})),
+                "decisiones": bp.get("decisiones_tecnicas", [])[:3],
+                "descripcion": bp.get("descripcion_general", "")[:200],
+                "puntaje_auto": b.get("puntaje", {}),
+            })
+    
+    print(f"[Arquitecto v3] 📐 {len(validos)}/{len(enfoques)} blueprints generados")
+    
+    # Elegir el mejor blueprint usando hard criteria + MoA si hay más de 1 válido
+    if len(validos) == 1:
+        mejor = validos[0]
+        blueprint_final = mejor.get("blueprint", {})
+        notas = mejor.get("notas", [])
+        print(f"[Arquitecto v3] 🏆 Único blueprint válido: {mejor['nombre']}")
+        
+    elif len(validos) >= 2:
+        # Usar MoA Aggregator (deepseek-v4-pro) para elegir el mejor
+        print(f"[Arquitecto v3] 🔬 MoA Aggregator eligiendo mejor blueprint...")
+        
+        # Preparar resumen de cada blueprint para el aggregator
+        resumenes = []
+        for b in validos:
+            bp = b.get("blueprint", {})
+            archivos = bp.get("archivos", {})
+            resumen = f"""{b['nombre']} ({b['enfoque'][:80]}):
+  Archivos ({len(archivos)}): {', '.join(archivos.keys())[:200]}
+  Descripción: {bp.get('descripcion_general', '')[:200]}
+  Decisiones técnicas: {chr(10).join(f'  - {d}' for d in bp.get('decisiones_tecnicas', [])[:3])}
+  Auto-puntaje: {json.dumps(b.get('puntaje', {}))}"""
+            resumenes.append(resumen)
+        
+        # Llamar al aggregator Pro para que elija
+        aggregator_llm = get_deepseek_pro_llm(temperature=0.15, max_tokens=1024)
+        aggregator_prompt = f"""Eres un arquitecto senior evaluando 3 propuestas de arquitectura.
+Debes elegir la MEJOR basado en completitud, claridad, y testabilidad.
+
+Responde SOLO JSON:
+{{
+    "mejor_blueprint": 0|1|2,
+    "justificacion": "por qué este es el mejor",
+    "confianza": 0.0-1.0,
+    "fusion_sugerida": "elementos de otros blueprints que deberían incorporarse"
+}}
+
+Propuestas:
+{chr(10).join(f'--- #{i} ---{chr(10)}{r}' for i, r in enumerate(resumenes))}"""
+        
+        response = await safe_invoke(aggregator_llm, [
+            SystemMessage(content="Eres un evaluador de arquitecturas. Responde SOLO JSON."),
+            HumanMessage(content=aggregator_prompt),
+        ])
+        
+        content = response.content if hasattr(response, 'content') else str(response)
+        
+        try:
+            content_clean = content.strip()
+            if content_clean.startswith("```"):
+                lines = content_clean.split("\n")
+                content_clean = "\n".join(lines[1:-1])
+            decision = json.loads(content_clean)
+            
+            mejor_idx = decision.get("mejor_blueprint", 0)
+            if 0 <= mejor_idx < len(validos):
+                mejor = validos[mejor_idx]
+                blueprint_final = mejor.get("blueprint", {})
+                notas = mejor.get("notas", [])
+                print(f"[Arquitecto v3] 🏆 MoA Aggregator eligió: {mejor['nombre']} "
+                      f"(confianza: {decision.get('confianza', '?')})")
+                notas.append(f"[MoA Aggregator] Elegido: {mejor['nombre']} — {decision.get('justificacion', '')[:200]}")
+                
+                # Si hay sugerencia de fusión, agregarla como nota
+                fusion = decision.get("fusion_sugerida", "")
+                if fusion:
+                    notas.append(f"[MoA Aggregator] Fusión sugerida: {fusion[:200]}")
+            else:
+                raise ValueError(f"Índice inválido: {mejor_idx}")
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"[Arquitecto v3] ⚠️ Aggregator falló ({e}), usando score auto-reportado")
+            # Fallback: el de mayor puntaje auto-reportado
+            def get_score(b):
+                p = b.get("puntaje", {})
+                return p.get("completitud", 0) + p.get("claridad", 0) + p.get("testabilidad", 0)
+            mejor = max(validos, key=get_score)
+            blueprint_final = mejor.get("blueprint", {})
+            notas = mejor.get("notas", [])
+            print(f"[Arquitecto v3] 🏆 Fallback a mejor score: {mejor['nombre']} (score {get_score(mejor)})")
+    else:
+        # Sin blueprints válidos
+        blueprint_final = {"descripcion_general": "Fallback - sin blueprint válido", "archivos": {}}
+        notas = ["[MoA] Ningún blueprint válido — usando fallback vacío"]
+    
+    num_files = len(blueprint_final.get("archivos", {}))
+    print(f"[Arquitecto v3] 🏆 MoA completado: {num_files} archivos | "
+          f"ensemble={len(ensemble)} variantes")
     
     audit = [{
-        "nodo": "Arquitecto v3 (Optimizado)",
-        "accion": "1 blueprint ROBUSTO generado",
-        "resultado": f"{len(blueprint_final.get('archivos', {}))} archivos",
+        "nodo": "Arquitecto v3 (MoA)",
+        "accion": f"MoA ensemble: {len(validos)} proposers + aggregator Pro",
+        "resultado": f"{num_files} archivos, ensemble={len(ensemble)} variantes",
     }]
     
     return {
         "architecture_blueprint": blueprint_final,
-        "scratchpad": notas,
+        "scratchpad": notas + [
+            f"[MoA Arquitecto] {len(proposer_responses)} proposers, confianza={confidence:.2f}",
+            f"[MoA Arquitecto] Ensemble: {len(ensemble)} variantes de blueprint",
+        ],
         "audit_trail": audit,
-        "ensemble_blueprints": [],  # Vacío — ya no hay ensemble
+        "ensemble_blueprints": ensemble,
     }
 
 

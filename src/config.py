@@ -52,7 +52,100 @@ OPENCODE_BASE_URL = os.getenv("OPENCODE_BASE_URL", OPENCODE_ZEN_BASE_URL)
 
 OPENCODE_MODEL_FREE = os.getenv("OPENCODE_MODEL", "deepseek-v4-flash-free")
 OPENCODE_MODEL_PAID = os.getenv("OPENCODE_MODEL_PAID", "deepseek-v4-flash")
-OPENCODE_PRO_MODEL = os.getenv("OPENCODE_PRO_MODEL", "deepseek-v4-pro")
+
+# Modelo premium para auditoría y micro-gates
+# Antes: deepseek-v4-pro ($1.74 in / $3.48 out)
+# Ahora:  qwen3.7-plus   ($0.40 in / $1.60 out) — 4.35x más barato
+OPENCODE_PRO_MODEL = os.getenv("OPENCODE_PRO_MODEL", "qwen3.7-plus")
+
+# ═══════════════════════════════════════════════════════════════
+# Nemotron 3 Ultra Free (temporal, plan Zen)
+# ═══════════════════════════════════════════════════════════════
+# Mismo API key y endpoint que los demás modelos Zen.
+# Según la página oficial de OpenCode Zen (10 jun 2026):
+#   Model ID: nemotron-3-ultra-free
+#   En OpenCode: opencode/nemotron-3-ultra-free
+#   Precio: FREE (disponible por tiempo limitado)
+#   Endpoint: https://opencode.ai/zen/v1/chat/completions
+NEMOTRON_MODEL = "nemotron-3-ultra-free"
+
+
+def get_nemotron_llm(temperature: float = 0.3, max_tokens: int = 4096) -> ChatOpenAI:
+    """Cliente LLM para Nemotron 3 Ultra Free (plan Zen, gratis).
+    
+    Periodo promocional por tiempo limitado. Usa el mismo API key
+    y endpoint que deepseek-v4-flash-free.
+    
+    Args:
+        temperature: Temperatura (default 0.3)
+        max_tokens: Máximo de tokens de salida (default 4096)
+    """
+    return ChatOpenAI(
+        model=NEMOTRON_MODEL,
+        api_key=OPENCODE_API_KEY,
+        base_url=OPENCODE_ZEN_BASE_URL,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+# MoA Multi-Model Helpers — Inteligencia Amplificada
+# ═══════════════════════════════════════════════════════════════
+
+def get_kimi_llm(temperature: float = 0.3, max_tokens: int = 2048) -> ChatOpenAI:
+    """Cliente LLM para Kimi K2.5 (Go pago).
+    
+    Excelente para análisis estratégico, creativo y perspectivas
+    alternativas en el MoA ensemble.
+    """
+    return ChatOpenAI(
+        model="opencode-go/kimi-k2.5",
+        api_key=OPENCODE_API_KEY,
+        base_url=OPENCODE_GO_BASE_URL,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+
+def get_deepseek_pro_llm(temperature: float = 0.15, max_tokens: int = 2048) -> ChatOpenAI:
+    """Cliente LLM para DeepSeek V4 Pro (Go pago).
+    
+    El modelo más inteligente del stack. Para razonamiento extremo,
+    MoA aggregation, y decisiones críticas de arquitectura.
+    HLE: 37.7 — SWE-Bench: 74.5
+    """
+    return ChatOpenAI(
+        model="deepseek-v4-pro",
+        api_key=OPENCODE_API_KEY,
+        base_url=OPENCODE_GO_BASE_URL,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+
+def get_model_llm(model_id: str, temperature: float = 0.3, max_tokens: int = 2048,
+                  use_go: bool = True) -> ChatOpenAI:
+    """Cliente LLM genérico para cualquier modelo del stack.
+    
+    Args:
+        model_id: ID del modelo (ej: "opencode-go/kimi-k2.5", "deepseek-v4-pro")
+        temperature: Temperatura
+        max_tokens: Máximo de tokens de salida
+        use_go: True = Go endpoint (pago), False = Zen endpoint (free)
+    
+    Returns:
+        ChatOpenAI configurado para el modelo solicitado
+    """
+    base_url = OPENCODE_GO_BASE_URL if use_go else OPENCODE_ZEN_BASE_URL
+    return ChatOpenAI(
+        model=model_id,
+        api_key=OPENCODE_API_KEY,
+        base_url=base_url,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
 
 # ═══════════════════════════════════════════════════════════════
 # Supabase
@@ -519,10 +612,15 @@ def get_llm(temperature: float = TEMPERATURE_DEFAULT, max_tokens: int = None) ->
 
 
 def get_pro_llm(max_tokens: int = None) -> ChatOpenAI:
-    """Cliente LLM para el Auditor (deepseek-v4-pro, Go pago).
+    """Cliente LLM para auditoría y micro-gates (Qwen3.7 Plus, Go pago).
     
-    SIEMPRE usa reinaagenciacol (Go). No tiene fallback free porque
-    deepseek-v4-pro solo está disponible en el plan Go.
+    OPTIMIZACIÓN DE COSTOS (10 Jun 2026):
+      Antes: deepseek-v4-pro ($1.74 in / $3.48 out)
+      Ahora: qwen3.7-plus   ($0.40 in / $1.60 out) — 4.35x más barato
+    
+    Rendimiento comparable para tareas de validación/auditoría.
+    Si se requiere la máxima precisión de deepseek-v4-pro, cambiar
+    OPENCODE_PRO_MODEL en .env.
     
     Optimizado para:
     - Máximo cache hit: temperature=0.15, system prompt estático

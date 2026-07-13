@@ -32,6 +32,8 @@ import asyncio
 import re
 import subprocess
 import sys
+import os
+import tempfile
 from pathlib import Path
 from langchain_core.messages import HumanMessage, SystemMessage
 from src.state import TeamState
@@ -226,7 +228,11 @@ def _resumir_blueprint(blueprint: dict) -> str:
 
 def _build_prompt(state: TeamState, verification_feedback: str = "",
                   es_autocorreccion: bool = False) -> str:
-    """Construye el prompt con debug history y feedback de ejecución."""
+    """Construye el prompt con debug history y feedback de ejecución.
+    
+    MEJORA TURBO: Inyecta heurísticas de memoria episódica en línea.
+    El programador aprende de ejecuciones anteriores MIENTRAS trabaja.
+    """
     blueprint = state.get("architecture_blueprint", {})
     test_report = state.get("test_report", {})
     scratchpad = state.get("scratchpad", [])
@@ -234,6 +240,16 @@ def _build_prompt(state: TeamState, verification_feedback: str = "",
     rules = state.get("business_rules", [])
     debug_history = state.get("debug_history", [])
     meta_plan = state.get("meta_plan", {})
+    
+    # 🧠 Memoria Episódica en línea: heurísticas aprendidas
+    heuristics_section = ""
+    try:
+        from src.episodic_memory import get_heuristics_context
+        heuristics_text = get_heuristics_context()
+        if heuristics_text:
+            heuristics_section = f"\n{heuristics_text}\n"
+    except Exception:
+        pass  # Silencioso si falla la memoria episódica
 
     blueprint_resumido = _resumir_blueprint(blueprint)
     scratchpad_relevante = scratchpad[-8:] if scratchpad else []
@@ -278,7 +294,7 @@ def _build_prompt(state: TeamState, verification_feedback: str = "",
     return f"""Requerimiento ({len(requirement)} chars, mostrando {req_limit}):
 {req_trimmed}
 {meta_section}
-Reglas:
+{heuristics_section}Reglas:
 {chr(10).join(f'- {r}' for r in rules[:8])}
 
 Blueprint:
@@ -326,6 +342,74 @@ async def _verify_code(source_code: dict, workdir: Path) -> str:
     return "\n".join(results) if results else "(sin archivos Python para verificar)"
 
 
+async def _run_local_tests(source_code: dict, workdir: Path, timeout: int = 60) -> str:
+    """Ejecuta pytest local sobre el código generado y devuelve el feedback.
+    
+    BASH-NATIVE: feedback loop instantáneo para el programador.
+    Si los tests fallan, devuelve el output para auto-corrección.
+    """
+    if not source_code:
+        return "(sin código para testear)"
+    
+    test_files = [f for f in source_code.keys() if "test" in f.lower()]
+    if not test_files:
+        return "(sin archivos de test — solo verificación sintáctica)"
+    
+    with tempfile.TemporaryDirectory(prefix="enjambre_pytest_") as tmpdir:
+        tmp_path = Path(tmpdir)
+        
+        # Escribir archivos
+        for fname, code in source_code.items():
+            fpath = tmp_path / fname
+            fpath.parent.mkdir(parents=True, exist_ok=True)
+            fpath.write_text(code)
+        
+        # Ejecutar pytest
+        result = await execute_command(
+            f"python3 -m pytest {tmpdir} -v --tb=short -q 2>&1",
+            timeout=timeout,
+        )
+        
+        if result.success:
+            return f"✅ Tests locales: PASS\n{result.stdout[:500]}"
+        
+        # Extraer errores para feedback
+        output = result.stdout + result.stderr
+        
+        # Intentar instalar dependencias faltantes y reintentar
+        if "ModuleNotFoundError" in output or "ImportError" in output:
+            for match in re.finditer(r"ModuleNotFoundError:\s*No module named ['\"](.+?)['\"]", output):
+                pkg = match.group(1)
+                pip_map = {
+                    "pandas": "pandas", "openpyxl": "openpyxl", "flask": "Flask",
+                    "fastapi": "fastapi", "pydantic": "pydantic", "sqlalchemy": "sqlalchemy",
+                    "requests": "requests", "httpx": "httpx", "pytest": "pytest",
+                }
+                pip_pkg = pip_map.get(pkg, pkg)
+                try:
+                    subprocess.run(
+                        [sys.executable, "-m", "pip", "install", pip_pkg, "-q"],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                except Exception:
+                    pass
+            
+            # Reintentar pytest después de instalar
+            result2 = await execute_command(
+                f"python3 -m pytest {tmpdir} -v --tb=short -q 2>&1",
+                timeout=timeout,
+            )
+            if result2.success:
+                return f"✅ Tests locales: PASS (tras instalar deps)\n{result2.stdout[:500]}"
+            output = result2.stdout + result2.stderr
+        
+        # Devolver feedback de error
+        lines = output.split("\n")[-30:]  # Últimas 30 líneas
+        error_summary = "\n".join(lines)
+        
+        return f"❌ Tests locales: FAIL\n{error_summary[:2000]}"
+
+
 async def programmer_node(state: TeamState) -> dict:
     """Programador Bash-Native V3 con auto-reflexión + TDD ligero."""
     iteration = state.get("iteration_count", 0)
@@ -347,10 +431,10 @@ async def programmer_node(state: TeamState) -> dict:
     prompt = _build_prompt(state)
     system_prompt = PROGRAMMER_PROMPT
     
+    # NOTA: El límite de tokens se maneja en model_router.py (8192 para Programador).
+    # El prompt base no necesita mención explícita de límite de tokens.
     if router.escalado >= 3:
-        system_prompt = PROGRAMMER_PROMPT.replace(
-            "Máximo 4096", "Máximo 8192"
-        ) + "\n\nUsa todo tu conocimiento como modelo Pro."
+        system_prompt = PROGRAMMER_PROMPT + "\n\nUsa todo tu conocimiento como modelo Pro. Genera código COMPLETO, sin truncar."
     
     response = await safe_invoke(llm, [
         SystemMessage(content=system_prompt),
@@ -386,15 +470,26 @@ async def programmer_node(state: TeamState) -> dict:
         if installed:
             notas.append(f"[AutoInstall] Dependencias instaladas: {', '.join(installed)}")
     
-    # Fase 2: Verificar código localmente (Bash-Native)
+    # Fase 2: Verificar código localmente (Bash-Native + pytest)
     verification_output = ""
     if source and any(f.endswith(".py") for f in source.keys()):
-        print(f"[Programador v3] 🔍 Verificando código localmente...")
-        verification_output = await _verify_code(source, exec_dir)
+        print(f"[Programador v3] 🔍 Verificando código localmente + pytest...")
         
-        # Si hay errores de sintaxis, intentar auto-corrección
-        if "⚠️" in verification_output:
-            print(f"[Programador v3] ⚠️ Errores de sintaxis detectados, auto-corrigiendo...")
+        # 2a. Verificación sintáctica
+        verification_output = await _verify_code(source, exec_dir)
+        test_feedback = ""
+        
+        # 2b. Ejecutar tests locales (Bash-Native feedback loop)
+        test_feedback = await _run_local_tests(source, exec_dir)
+        if "PASS" not in test_feedback and "sin archivos" not in test_feedback:
+            verification_output += f"\n\n--- PYTESTS LOCALES ---\n{test_feedback}"
+        
+        # 2c. Auto-corrección si hay errores (sintaxis O tests)
+        necesita_correccion = "⚠️" in verification_output or ("❌" in verification_output and "PYTESTS" in verification_output)
+        
+        if necesita_correccion:
+            error_tipo = "sintaxis" if "⚠️" in verification_output else "tests"
+            print(f"[Programador v3] ⚠️ Errores de {error_tipo} detectados, auto-corrigiendo...")
             
             prompt2 = _build_prompt(state, verification_feedback=verification_output, es_autocorreccion=True)
             response2 = await safe_invoke(llm, [
@@ -416,8 +511,11 @@ async def programmer_node(state: TeamState) -> dict:
                     auto_reflection = result2.get("auto_reflection", auto_reflection)
                     print(f"[Programador v3] ✅ Auto-corrección aplicada")
                     
-                    # Re-verificar
+                    # Re-verificar después de corrección
                     verification_output = await _verify_code(source, exec_dir)
+                    test_feedback2 = await _run_local_tests(source, exec_dir)
+                    if "PASS" not in test_feedback2 and "sin archivos" not in test_feedback2:
+                        verification_output += f"\n\n--- PYTESTS LOCALES (post-corrección) ---\n{test_feedback2}"
             except (json.JSONDecodeError, KeyError):
                 print(f"[Programador v3] ⚠️ Auto-corrección falló, usando código original")
 
@@ -428,13 +526,20 @@ async def programmer_node(state: TeamState) -> dict:
                      f"Confianza: {auto_reflection.get('confianza', 0.0):.2f}, "
                      f"Puntos fallidos: {auto_reflection.get('puntos_fallidos', [])}")
 
+    # Estado de verificación 
+    tiene_errores = "⚠️" in verification_output or "❌" in verification_output
+    tiene_tests = "PASS" in verification_output or "sin archivos" not in verification_output
+    verif_status = "OK" if not tiene_errores else "WARN"
+    if "PYTESTS" in verification_output:
+        verif_status += "+TESTS"
+
     return {
         "source_code": source,
         "scratchpad": notas,
         "audit_trail": [{
             "nodo": f"Programador v3 ({modelo_usado})",
-            "accion": "Generación + verificación local + auto-reflexión",
-            "resultado": f"{len(source)} archivos, verificación: {'OK' if '⚠️' not in verification_output else 'WARN'}, "
+            "accion": "Generación + verificación local + pytest + auto-reflexión",
+            "resultado": f"{len(source)} archivos, verificación: {verif_status}, "
                         f"auto-reflexión: {auto_reflection.get('checklist_passed', False)}",
         }],
     }
