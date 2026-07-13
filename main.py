@@ -173,6 +173,17 @@ async def run_swarm(requirement: str) -> dict:
 
         print("\n" + "=" * 70)
 
+        # ── Memory Engine: auto-save ──
+        try:
+            from src.memory_engine.session_manager import SessionManager
+            sm = SessionManager()
+            save_result = sm.save_pipeline_run(requirement, final_state, start_time)
+            print(f"\n🧠 [MemoryEngine] Auto-save: {save_result.get('chat_id', '?')} | "
+                  f"Diario: {save_result.get('diary_updated', {}).get('status', '?')} | "
+                  f"Índice: {save_result.get('index_entries', 0)} entradas")
+        except Exception as me:
+            print(f"\n⚠️ [MemoryEngine] Error en auto-save: {me}")
+
         # ── QueenChat: notificar resultados ──
         if ENJAMBRE_MODE and queenchat is not None:
             try:
@@ -215,6 +226,18 @@ async def run_swarm(requirement: str) -> dict:
     except Exception as e:
         print(f"\n❌ Error: {e}")
         
+        # ── Memory Engine: auto-save de error ──
+        try:
+            from src.memory_engine.session_manager import SessionManager
+            sm = SessionManager()
+            sm.begin(project="agent-swarm", topic=f"Error: {str(requirement[:60])}")
+            sm.add_turn("user", requirement)
+            sm.add_turn("smith", f"❌ Error en pipeline: {str(e)[:500]}")
+            sm.end(achievements=[], pending=[f"Resolver error: {str(e)[:200]}"])
+            print(f"\n🧠 [MemoryEngine] Error auto-saved")
+        except Exception as me:
+            print(f"\n⚠️ [MemoryEngine] Error saving error: {me}")
+
         # ── QueenChat: notificar error ──
         if ENJAMBRE_MODE and queenchat is not None:
             try:

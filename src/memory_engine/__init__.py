@@ -34,6 +34,7 @@ from src.memory_engine.naming import (
     next_version,
     CHAT_ID_PATTERN,
 )
+from src.memory_engine.session_manager import SessionManager
 from src.memory_engine.chat_logger import ChatLogger
 from src.memory_engine.chunker import Chunker
 from src.memory_engine.indexer import Indexer
@@ -143,5 +144,6 @@ __all__ = [
     "MemoryEngine",
     "ChatSession", "ChatChunk", "ProjectDiary", "IndexEntry", "SearchResult", "MergeStrategy",
     "generate_chat_id", "parse_chat_id", "parse_frontmatter", "build_frontmatter",
+    "SessionManager",
     "ChatLogger", "Chunker", "Indexer", "Searcher", "DiaryManager", "ProjectManager",
 ]
