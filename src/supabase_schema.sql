@@ -88,7 +88,7 @@ BEGIN
             am.content,
             am.task_type,
             am.metadata,
-            1.0 - (am.embedding <=> query_embedding) AS similarity
+            1.0 - (am.embedding <=> query_embedding) AS sim_score
         FROM agent_memory am
         WHERE 1.0 - (am.embedding <=> query_embedding) > similarity_threshold::DOUBLE PRECISION
         ORDER BY am.embedding <=> query_embedding
@@ -100,18 +100,18 @@ BEGIN
             am.content,
             am.task_type,
             am.metadata,
-            ts_rank(am.keywords, plainto_tsquery('spanish', query_text)) AS rank
+            ts_rank(am.keywords, plainto_tsquery('spanish', query_text)) AS rank_score
         FROM agent_memory am
         WHERE am.keywords @@ plainto_tsquery('spanish', query_text)
-        ORDER BY rank DESC
+        ORDER BY rank_score DESC
         LIMIT match_limit * 2
     ),
     semantic_ranked AS (
-        SELECT *, ROW_NUMBER() OVER (ORDER BY similarity DESC) AS rn
+        SELECT *, ROW_NUMBER() OVER (ORDER BY sim_score DESC) AS rn
         FROM semantic
     ),
     fulltext_ranked AS (
-        SELECT *, ROW_NUMBER() OVER (ORDER BY rank DESC) AS rn
+        SELECT *, ROW_NUMBER() OVER (ORDER BY rank_score DESC) AS rn
         FROM fulltext
     )
     SELECT
@@ -119,7 +119,7 @@ BEGIN
         COALESCE(s.content, f.content) AS content,
         COALESCE(s.task_type, f.task_type) AS task_type,
         COALESCE(s.metadata, f.metadata)::JSONB AS metadata,
-        COALESCE(s.similarity, 0.0)::DOUBLE PRECISION AS similarity,
+        COALESCE(s.sim_score, 0.0)::DOUBLE PRECISION AS similarity,
         (COALESCE(1.0 / (k_constant + s.rn), 0.0) +
          COALESCE(1.0 / (k_constant + f.rn), 0.0))::DOUBLE PRECISION AS rrf_score
     FROM semantic_ranked s
