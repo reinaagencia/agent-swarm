@@ -31,7 +31,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.config import (
     get_llm, get_pro_llm, get_kimi_llm, get_deepseek_pro_llm,
-    get_model_llm, safe_invoke, TEMPERATURE_CREATIVE
+    get_model_llm, get_ollama_llm, safe_invoke, TEMPERATURE_CREATIVE,
+    get_fallback_level, FALLBACK_NAMES
 )
 
 
@@ -50,12 +51,29 @@ class MoAResponse:
 
 @dataclass
 class MoAConfig:
-    """Configuración del MoA Orchestrator."""
+    """Configuración del MoA Orchestrator.
+    
+    MODOS:
+      FULL (turbo):  proposers=flash/kimi/qwen + aggregator=deepseek-v4-pro
+      LITE (eco):    proposers=flash (x3) + aggregator=self-score (sin Pro)
+      LOCAL:         proposers=flash (x3) + aggregator=flash (sin llamadas externas)
+    """
+    mode: str = "full"                   # "full" | "lite" | "local"
     use_proposer_pro: bool = False       # True = 1 proposer con Pro (más caro)
     use_aggregator_pro: bool = True      # True = aggregator con Pro (recomendado)
     timeout_per_proposer: float = 45.0   # Timeout por proposer
     min_consensus: float = 0.6           # Mínimo agreement para early exit
     parallel_proposers: bool = True      # Ejecutar proposers en paralelo
+    
+    def __post_init__(self):
+        """Ajusta configuración según el modo."""
+        if self.mode == "lite":
+            self.use_aggregator_pro = False
+            self.use_proposer_pro = False
+        elif self.mode == "local":
+            self.use_aggregator_pro = False
+            self.use_proposer_pro = False
+            self.timeout_per_proposer = 120  # Modelos locales son más lentos
 
 
 # ── Proposer Registry ──────────────────────────────────────────
@@ -200,12 +218,25 @@ class MoAOrchestrator:
                 context=context,
             )
         else:
-            # Sin aggregator: tomar la de mayor confianza
-            best = max(valid_responses, key=lambda r: r.confidence)
+            # Sin aggregator Pro: auto-score ponderado (LITE/LOCAL mode)
+            # Score = confianza * 0.5 + longitud * 0.3 + diversidad * 0.2
+            def _score_response(r: MoAResponse) -> float:
+                length_score = min(len(r.content) / 3000, 1.0)  # Qué tan completo
+                return r.confidence * 0.6 + length_score * 0.4
+            
+            scored = [(r, _score_response(r)) for r in valid_responses]
+            scored.sort(key=lambda x: x[1], reverse=True)
+            
+            best, best_score = scored[0]
+            mode_label = self.config.mode.upper()
+            print(f"  [MoA] 🏆 Auto-score ({mode_label}): '{best.agent_id}' "
+                  f"(score={best_score:.3f}, confianza={best.confidence:.2f})")
+            
             answer = {
                 "answer": best.content,
-                "confidence": best.confidence,
+                "confidence": best_score,
                 "source": best.agent_id,
+                "mode": self.config.mode,
             }
         
         # Calcular consenso
@@ -420,3 +451,77 @@ Analiza, sintetiza y produce la mejor respuesta posible."""
     def clear_cache(self):
         """Limpia la caché de resultados MoA."""
         self._cache.clear()
+
+
+# ═══════════════════════════════════════════════════════════════
+# ModelRouterMoA — Decide modo según contexto
+# ═══════════════════════════════════════════════════════════════
+
+class ModelRouterMoA:
+    """Router que decide qué modo MoA usar según el contexto.
+    
+    REGLAS:
+      - Si fallback_level >= 2 (Go pago) y complexity medium/high → FULL
+      - Si fallback_level < 2 (Zen free) → LITE
+      - Si hay variable OLLAMA_AVAILABLE → LOCAL
+      - Si complexity "low" → siempre single-pass (sin MoA)
+    
+    Uso:
+        router = ModelRouterMoA()
+        mode = router.decide(complexity="medium")
+        moa = MoAOrchestrator(MoAConfig(mode=mode))
+    """
+    
+    @staticmethod
+    def decide(complexity: str = "medium", force_local: bool = False) -> str:
+        """Decide el modo MoA óptimo según el contexto actual.
+        
+        Args:
+            complexity: "low", "medium", "high"
+            force_local: True para forzar modo local (Ollama)
+        
+        Returns:
+            "full" | "lite" | "local" | "none"
+        """
+        import os
+        
+        # Tareas simples no necesitan MoA
+        if complexity == "low":
+            return "none"
+        
+        # Forzar modo local?
+        if force_local:
+            local_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+            try:
+                import urllib.request
+                urllib.request.urlopen(f"{local_url}/api/tags", timeout=2)
+                return "local"
+            except Exception:
+                print("  [MoA Router] ⚠️ Ollama no disponible, fallback a lite")
+                return "lite"
+        
+        # Decidir basado en nivel de fallback
+        fallback_level = get_fallback_level()
+        
+        if fallback_level >= 2:
+            # Estamos en Go (pago) — podemos usar FULL
+            return "full"
+        else:
+            # Estamos en Zen (free) — modo lite para ahorrar
+            return "lite"
+    
+    @staticmethod
+    def get_proposers_for_mode(mode: str) -> list:
+        """Devuelve la lista de proposers para el modo dado."""
+        if mode == "full":
+            return ["flash", "kimi", "qwen"]
+        elif mode == "lite":
+            return ["flash", "flash", "flash"]  # 3 flashes con diferentes prompts
+        elif mode == "local":
+            return ["flash", "flash", "flash"]  # Todos flash (locales)
+        return ["flash"]  # Modo none = 1 proposer
+    
+    @staticmethod
+    def get_config_for_mode(mode: str) -> MoAConfig:
+        """Devuelve la config MoA para el modo dado."""
+        return MoAConfig(mode=mode)

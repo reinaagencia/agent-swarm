@@ -148,6 +148,39 @@ def get_model_llm(model_id: str, temperature: float = 0.3, max_tokens: int = 204
 
 
 # ═══════════════════════════════════════════════════════════════
+# Modelos Locales (Ollama)
+# ═══════════════════════════════════════════════════════════════
+
+# URL base de Ollama local (https://ollama.com)
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+def get_ollama_llm(model: str = "qwen3:8b", temperature: float = 0.3,
+                   max_tokens: int = 4096) -> ChatOpenAI:
+    """Cliente LLM para modelos locales vía Ollama.
+    
+    Args:
+        model: Modelo Ollama (ej: "qwen3:8b", "gemma4:12b", "deepseek-r1:7b")
+        temperature: Temperatura
+        max_tokens: Máximo de tokens de salida
+    
+    Uso:
+        llm = get_ollama_llm("gemma4:12b")
+        response = await llm.ainvoke([...])
+    
+    Requiere:
+        - Ollama corriendo (ollama serve)
+        - Modelo descargado (ollama pull qwen3:8b)
+    """
+    return ChatOpenAI(
+        model=model,
+        api_key="ollama",  # Ollama no requiere API key
+        base_url=f"{OLLAMA_BASE_URL}/v1",  # API compatible con OpenAI
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
 # Supabase
 # ═══════════════════════════════════════════════════════════════
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
