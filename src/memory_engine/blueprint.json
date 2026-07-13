@@ -1,0 +1,992 @@
+{
+  "blueprint": {
+    "nombre": "Sistema de Memoria Multi-Capa (Memory Engine)",
+    "version": "1.0.0",
+    "descripcion": "Sistema de memoria jerárquica de 6 capas (L0–L5) para el Enjambre 4.0. Proporciona persistencia, indexación semántica, búsqueda híbrida y consolidación offline para todos los agentes del ecosistema.",
+    "arquitectura_general": {
+      "patron": "Layered Architecture + Event Sourcing + CQRS (separación escritura/lectura)",
+      "principios": [
+        "Cada capa tiene responsabilidad única y mecanismo de persistencia distinto",
+        "Los datos fluyen L0→L1→L2→L3 de forma progresiva (waterfall consolidation)",
+        "L4 es el índice maestro de consulta (cross-layer read model)",
+        "L5 es el worker asíncrono de consolidación/mantenimiento (write model separado)",
+        "El flujo de escritura es asíncrono: nunca bloquea al agente que escribe",
+        "Frontmatter YAML obligatorio en todos los archivos de disco para auto-descubrimiento"
+      ]
+    },
+
+    "capas": {
+      "L0_working_memory": {
+        "nombre": "Working Memory (Contexto Activo)",
+        "tier": 0,
+        "persistencia": "En RAM / TeamState del grafo LangGraph",
+        "tiempo_vida": "Duración de una ejecución del pipeline",
+        "capacidad": "~16KB de contexto (token budget del pipeline)",
+        "implementacion": "Wrapper sobre TeamState existente en state.py",
+        "archivo_responsable": "src/memory_engine/__init__.py (provee MemoryContext adapter)",
+        "integra_con": ["L1 via hook al final de cada ejecución", "graph.py via inject_memory_context()"],
+        "ya_existente": true,
+        "notas": "Reutilizar el TeamState actual. MemoryEngine solo añade hooks de persistencia al finalizar cada iteración del grafo."
+      },
+
+      "L1_episodic_buffer": {
+        "nombre": "Episodic Buffer (Sesión Activa)",
+        "tier": 1,
+        "persistencia": "Archivos en ~/.agents/memoria/episodic/",
+        "tiempo_vida": "Duración de una sesión completa (horas)",
+        "capacidad": "~50 entradas por sesión (aprox 500KB)",
+        "formato_archivo": "CHAT-{YYYYMMDD}-{proyecto}-{tema}-v{N}.md",
+        "frontmatter_yaml": true,
+        "archivo_responsable": "src/memory_engine/episodic_buffer.py",
+        "integra_con": ["L2 via consolidate() al cerrar sesión", "chat_logger.py para escritura"],
+        "ya_existente": false,
+        "notas": "Sustituye/Envuelve el episodic_memory.py actual. Guarda auto-save cada N turnos."
+      },
+
+      "L2_chats_historicos": {
+        "nombre": "Chats Históricos Completos",
+        "tier": 2,
+        "persistencia": "Archivos en ~/.agents/memoria/chats/ + Supabase pgvector",
+        "tiempo_vida": "Indefinido (retención configurable: 90 días por defecto)",
+        "capacidad": "Ilimitada (disco + Supabase)",
+        "formato_archivo": "CHAT-{YYYYMMDD}-{proyecto}-{tema}-v{N}.md",
+        "frontmatter_yaml": true,
+        "indexacion": "Chunks semánticos de 512 tokens con overlap de 128 tokens. Cada chunk → embedding 384d → Supabase pgvector",
+        "archivo_responsable": "src/memory_engine/chat_logger.py",
+        "subcomponentes": [
+          "chat_logger.py — escritura de archivos + frontmatter",
+          "chunker.py — chunking semántico",
+          "indexer.py — embedding + inserción Supabase"
+        ],
+        "integra_con": ["L3 via consolidate_proyecto()", "L4 via update_index()"],
+        "ya_existente": false
+      },
+
+      "L3_diarios_proyecto": {
+        "nombre": "Diarios de Proyecto",
+        "tier": 3,
+        "persistencia": "Archivos en ~/.agents/memoria/proyectos/{nombre}/diario.md + resumenes/",
+        "tiempo_vida": "Indefinido (solo append, nunca se borra)",
+        "formato_archivo": "diario.md (Markdown estructurado con secciones YYYY-MM-DD)",
+        "frontmatter_yaml": true,
+        "archivo_responsable": "src/memory_engine/diary.py",
+        "subcomponentes": [
+          "diary.py — append entries, generar resúmenes semanales",
+          "project_manager.py — merge, fuse, split de proyectos"
+        ],
+        "integra_con": ["L2 via lectura de chats del proyecto", "L4 via update_index()"],
+        "ya_existente": false
+      },
+
+      "L4_indice_general": {
+        "nombre": "Índice General Maestro",
+        "tier": 4,
+        "persistencia": "Supabase tabla memory_index + ~/.agents/memoria/index.json (caché local)",
+        "tiempo_vida": "Siempre actualizado (se reconstruye parcialmente en cada escritura)",
+        "estructura": "Mapa: chunk_id → {layer, file_path, project, tags, embedding_id, date, summary}",
+        "implementacion": "Índice hash local + Supabase con embedding para búsqueda semántica cross-layer",
+        "archivo_responsable": "src/memory_engine/indexer.py",
+        "integra_con": "Todas las capas via register_entry()",
+        "ya_existente": false,
+        "notas": "Es el punto de entrada de todas las búsquedas. search.py consulta L4 primero para saber qué capas contienen resultados relevantes."
+      },
+
+      "L5_offline_processing": {
+        "nombre": "Procesamiento Offline (Sleep-Time)",
+        "tier": 5,
+        "persistencia": "Trabajo en ~/.agents/memoria/processing/ + locks",
+        "periodicidad": "Trigger manual o cron cada 6 horas",
+        "tareas": [
+          "Consolidación L1→L2: mover episodios viejos (>2h) a chats históricos",
+          "Chunking e indexación de L2 pendientes",
+          "Minería de patrones: detectar temas recurrentes entre chats L2",
+          "Actualización de diarios L3: generar/refinar resúmenes de proyecto",
+          "Re-indexación L4: verificar integridad, reparar entradas huérfanas",
+          "Prunning: marcar entradas irrelevantes (score < 0.3 por >30 días)"
+        ],
+        "archivo_responsable": "src/memory_engine/cli.py (comando 'process') + processing_worker internos",
+        "integra_con": "Todas las capas",
+        "ya_existente": false
+      }
+    },
+
+    "sistema_nomenclatura": {
+      "patron_archivo": "CHAT-{YYYYMMDD}-{proyecto}-{tema}-v{N}.md",
+      "campos_del_nombre": {
+        "YYYYMMDD": "Fecha de creación (ej: 20260713)",
+        "proyecto": "Nombre corto del proyecto (kebab-case, ej: agent-swarm, queenchat, cliente-x)",
+        "tema": "Tópico principal (kebab-case, ej: memory-engine, api-rest, bug-fix-trading)",
+        "v{N}": "Número de versión secuencial empezando en 1 (ej: v1, v2, v3)"
+      },
+      "ejemplos": [
+        "CHAT-20260713-agent-swarm-memory-engine-v1.md",
+        "CHAT-20260713-queenchat-calendar-fix-v2.md",
+        "CHAT-20260712-cliente-x-landing-page-v1.md"
+      ],
+      "frontmatter_yaml_estandar": {
+        "campos_obligatorios": [
+          "session_id (uuid)",
+          "type (episodic|chat|diary|project)",
+          "date (YYYY-MM-DD)",
+          "project (string)",
+          "topic (string)",
+          "version (int)",
+          "status (in_progress|completed|failed|archived)"
+        ],
+        "campos_opcionales": [
+          "tags (list)",
+          "model (string)",
+          "tokens_used (int)",
+          "duration_seconds (int)",
+          "summary (string)",
+          "parent_session (uuid|null)",
+          "chunks (list de {id, offset, length, summary, embedding_id})",
+          "participants (list de agent names)",
+          "project_files (list de rutas modificadas)"
+        ],
+        "ejemplo_completo": "---\nsession_id: a1b2c3d4-e5f6-7890-abcd-ef1234567890\ntype: chat\ndate: 2026-07-13\nproject: agent-swarm\ntopic: memory-engine\nversion: 1\ntags: [memory, architecture, blueprint, python]\nmodel: deepseek-v4-flash\ntokens_used: 12500\nduration_seconds: 345\nstatus: completed\nsummary: 'Diseño e implementación del sistema de memoria multi-capa L0-L5'\nparent_session: null\nchunks:\n  - id: chunk_001\n    offset: 0\n    length: 1800\n    summary: 'Arquitectura general del sistema'\n    embedding_id: emb_abc123\n  - id: chunk_002\n    offset: 1800\n    length: 2100\n    summary: 'Implementación de las capas L0-L2'\n    embedding_id: emb_def456\nparticipants: [arquitecto, programador, tester]\nproject_files: [src/memory_engine/models.py, src/memory_engine/naming.py]\n---\n\n[Contenido del chat en Markdown...]\n"
+      },
+      "validacion_nombre": {
+        "regex": "^CHAT-\\d{8}-[a-z0-9-]+-[a-z0-9-]+-v\\d+\\.md$",
+        "funcion": "naming.py → parse_chat_filename() y build_chat_filename()",
+        "reglas": [
+          "proyecto: solo lowercase, números y guiones (máx 30 chars)",
+          "tema: solo lowercase, números y guiones (máx 40 chars)",
+          "v{N}: N auto-incremental por (proyecto + tema + fecha) único",
+          "Si ya existe CHAT-20260713-agent-swarm-memory-engine-v1.md, la siguiente es v2"
+        ]
+      }
+    },
+
+    "esquemas_de_datos": {
+      "archivo": "src/memory_engine/models.py",
+
+      "clase_MemoryEntry": {
+        "tipo": "Dataclass",
+        "campos": [
+          {"name": "entry_id", "type": "str", "desc": "UUID único (24 chars, prefijo ml-* o chat-* según tipo)"},
+          {"name": "layer", "type": "int", "desc": "Capa: 0-5"},
+          {"name": "content", "type": "str", "desc": "Contenido textual (hasta 50KB)"},
+          {"name": "embedding", "type": "list[float] | None", "desc": "Vector 384d (solo L2, L4)"},
+          {"name": "metadata", "type": "dict", "desc": "Metadatos YAML-serializables"}
+        ]
+      },
+
+      "clase_ChatFile": {
+        "tipo": "Dataclass",
+        "campos": [
+          {"name": "filepath", "type": "Path", "desc": "Ruta absoluta al archivo"},
+          {"name": "frontmatter", "type": "dict", "desc": "YAML parseado"},
+          {"name": "content", "type": "str", "desc": "Cuerpo del chat (sin frontmatter)"},
+          {"name": "filename", "type": "str", "desc": "Nombre del archivo"},
+          {"name": "parsed_name", "type": "ChatFileName | None", "desc": "Nombre parseado en campos"}
+        ],
+        "metodos": [
+          "load() → carga y parsea archivo",
+          "save() → escribe con frontmatter",
+          "to_dict() → serialización completa"
+        ]
+      },
+
+      "clase_ChatFileName": {
+        "tipo": "Dataclass",
+        "campos": [
+          {"name": "date", "type": "str", "desc": "YYYYMMDD"},
+          {"name": "project", "type": "str"},
+          {"name": "topic", "type": "str"},
+          {"name": "version", "type": "int"}
+        ]
+      },
+
+      "clase_SemanticChunk": {
+        "tipo": "Dataclass",
+        "campos": [
+          {"name": "chunk_id", "type": "str", "desc": "chunk_XXXXX (secuencial por archivo)"},
+          {"name": "source_file", "type": "str", "desc": "Archivo de origen"},
+          {"name": "session_id", "type": "str", "desc": "UUID de la sesión"},
+          {"name": "offset_chars", "type": "int", "desc": "Offset en caracteres desde inicio del content"},
+          {"name": "length_chars", "type": "int", "desc": "Longitud en caracteres"},
+          {"name": "tokens_approx", "type": "int", "desc": "Tokens aproximados (chars/4)"},
+          {"name": "content", "type": "str", "desc": "Texto del chunk"},
+          {"name": "summary", "type": "str", "desc": "Resumen generado por LLM del chunk"},
+          {"name": "embedding", "type": "list[float] | None", "desc": "Vector 384d"},
+          {"name": "embedding_id", "type": "str | None", "desc": "ID en Supabase pgvector"}
+        ]
+      },
+
+      "clase_ProjectDiary": {
+        "tipo": "Dataclass",
+        "campos": [
+          {"name": "project_name", "type": "str"},
+          {"name": "diary_path", "type": "Path"},
+          {"name": "entries", "type": "list[DiaryEntry]", "desc": "Entradas cronológicas"}
+        ]
+      },
+
+      "clase_DiaryEntry": {
+        "tipo": "Dataclass",
+        "campos": [
+          {"name": "date", "type": "str", "desc": "YYYY-MM-DD"},
+          {"name": "type", "type": "str", "desc": "decision|progress|blocker|summary|milestone"},
+          {"name": "content", "type": "str", "desc": "Texto de la entrada"},
+          {"name": "related_chats", "type": "list[str]", "desc": "Lista de session_ids de L2 relacionados"},
+          {"name": "tags", "type": "list[str]"}
+        ]
+      },
+
+      "clase_IndexEntry": {
+        "tipo": "Dataclass",
+        "campos": [
+          {"name": "index_id", "type": "str", "desc": "UUID del índice"},
+          {"name": "chunk_id", "type": "str"},
+          {"name": "session_id", "type": "str"},
+          {"name": "layer", "type": "int", "desc": "0-5"},
+          {"name": "file_path", "type": "str"},
+          {"name": "project", "type": "str"},
+          {"name": "topic", "type": "str"},
+          {"name": "date", "type": "str", "desc": "YYYY-MM-DD"},
+          {"name": "tags", "type": "list[str]"},
+          {"name": "summary", "type": "str"},
+          {"name": "embedding", "type": "list[float] | None"},
+          {"name": "embedding_id", "type": "str | None"},
+          {"name": "access_count", "type": "int", "default": 0},
+          {"name": "last_accessed", "type": "str | None", "desc": "ISO datetime"}
+        ]
+      },
+
+      "esquema_supabase_adicional": {
+        "tabla_memory_index": {
+          "sql": "CREATE TABLE IF NOT EXISTS memory_index (\n    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n    chunk_id VARCHAR(50) NOT NULL,\n    session_id UUID,\n    layer INTEGER NOT NULL CHECK (layer BETWEEN 0 AND 5),\n    file_path TEXT NOT NULL,\n    project VARCHAR(255),\n    topic VARCHAR(255),\n    date DATE NOT NULL,\n    tags TEXT[],\n    summary TEXT,\n    embedding VECTOR(384),\n    metadata JSONB DEFAULT '{}',\n    access_count INTEGER DEFAULT 0,\n    last_accessed TIMESTAMPTZ,\n    created_at TIMESTAMPTZ DEFAULT now()\n);\nCREATE INDEX IF NOT EXISTS idx_memory_index_layer ON memory_index (layer);\nCREATE INDEX IF NOT EXISTS idx_memory_index_project ON memory_index (project);\nCREATE INDEX IF NOT EXISTS idx_memory_index_date ON memory_index (date DESC);\nCREATE INDEX IF NOT EXISTS idx_memory_index_embedding ON memory_index USING ivfflat (embedding vector_cosine_ops) WITH (lists = 50);"
+        },
+        "tabla_memory_sessions": {
+          "sql": "CREATE TABLE IF NOT EXISTS memory_sessions (\n    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n    session_id VARCHAR(50) UNIQUE NOT NULL,\n    project VARCHAR(255),\n    topic VARCHAR(255),\n    status VARCHAR(20) DEFAULT 'in_progress',\n    model VARCHAR(100),\n    tokens_used INTEGER DEFAULT 0,\n    duration_seconds INTEGER DEFAULT 0,\n    message_count INTEGER DEFAULT 0,\n    file_path TEXT,\n    chunk_count INTEGER DEFAULT 0,\n    summary TEXT,\n    tags TEXT[],\n    created_at TIMESTAMPTZ DEFAULT now(),\n    updated_at TIMESTAMPTZ DEFAULT now(),\n    completed_at TIMESTAMPTZ\n);"
+        },
+        "indices_adicionales": {
+          "hybrid_search_memory_index": "Misma función RPC que match_agent_memory pero sobre memory_index. Se puede reutilizar la misma función con nombre de tabla parametrizado o crear match_memory_index(query_embedding VECTOR(384), query_text TEXT, match_limit INT, layer_filter INT DEFAULT NULL)."
+        }
+      }
+    },
+
+    "estructura_archivos_en_disco": {
+      "base_path": "~/.agents/memoria/",
+      "arbol": {
+        "~/.agents/memoria/": {
+          "README.md": "Documentación del sistema de archivos",
+          ".gitignore": "Ignorar *.tmp, processing/*, local.db",
+          "index.json": "Caché local del L4 Master Index",
+          "local.db": "SQLite fallback para búsqueda local",
+          "episodic/": {
+            "README.md": "Carpeta de episodios activos (L1)",
+            "CHAT-{YYYYMMDD}-{proyecto}-{tema}-v{N}.md": "Episodios de sesión activa",
+            "active.session": "Symlink o archivo señalando al episodio activo"
+          },
+          "chats/": {
+            "README.md": "Carpeta de chats históricos completos (L2)",
+            "CHAT-{YYYYMMDD}-{proyecto}-{tema}-v{N}.md": "Chats completos indexados",
+            ".pending_index": "Lista de archivos pendientes de chunking/indexación"
+          },
+          "proyectos/": {
+            "README.md": "Carpeta de diarios de proyecto (L3)",
+            "{nombre_proyecto}/": {
+              "diario.md": "Diario cronológico del proyecto",
+              "resumen.md": "Resumen auto-generado del proyecto",
+              "chats.list": "Lista de session_ids de L2 pertenecientes al proyecto"
+            }
+          },
+          "processing/": {
+            "README.md": "Carpeta temporal para procesamiento offline (L5)",
+            "locks/": "Archivos .lock para evitar ejecución concurrente",
+            "logs/": "Logs de procesamiento",
+            "batch_{timestamp}.json": "Trabajos pendientes de procesamiento"
+          },
+          "vault/": {
+            "README.md": "Archivos no indexados, adjuntos, assets",
+            "images/": "Capturas/imágenes referenciadas en chats",
+            "files/": "Archivos adjuntos referenciados"
+          }
+        }
+      },
+      "permisos": "Todos los archivos: 644, directorios: 755"
+    },
+
+    "diagrama_flujo_datos": {
+      "flujo_escritura": [
+        "1. Agente escribe en L0 (Working Memory / TeamState)",
+        "2. Hook post-ejecución: MemoryEngine.flush() captura estado L0",
+        "3. → L1: Se escribe archivo CHAT en episodic/ con fronmatter YAML in_progress",
+        "4. → L4: Se registra entrada en master index con embedding de la línea de asunto",
+        "5. Al cerrar sesión: L1→L2: Se mueve a chats/, se genera frontmatter final con resumen",
+        "6. L2: Chunker divide en chunks semánticos, Indexer genera embeddings y guarda en Supabase",
+        "7. L4: Se actualiza índice con todos los chunk_ids y embedding_ids",
+        "8. (Asíncrono) L5: Consolidación L2→L3: mina patrones y actualiza diario del proyecto"
+      ],
+      "flujo_lectura_busqueda": [
+        "1. search.hybrid_search(query, layers=[0,1,2,3,4])",
+        "2. Parallel:",
+        "   a. L0: keywords en TeamState actual",
+        "   b. L1: keywords en archivos episodic/ activos",
+        "   c. L4: búsqueda vectorial + BM25 en master index (Supabase)",
+        "3. RRF fusion de resultados L0 + L1 + L4 (K=60)",
+        "4. Para cada resultado relevante de L4:",
+        "   a. Si layer=2: leer chunk de archivo L2 en disco",
+        "   b. Si layer=3: leer entrada de diario L3",
+        "5. Consolidar y rankear por RRF score",
+        "6. Retornar top-K resultados con metadatos de procedencia"
+      ],
+      "flujo_consolidacion": {
+        "L1_a_L2": "Trigger: sesión cerrada o timeout de 2h. Mueve archivo de episodic/ a chats/. Actualiza frontmatter.",
+        "L2_a_L3": "Trigger: L5 cada 6h o cuando hay 5+ nuevos chats del mismo proyecto. Extrae decisiones, patrones, blockers y escribe en diario.md del proyecto.",
+        "L3_a_L4": "Trigger: cada actualización de L3. Re-genera embedding del resumen del proyecto y actualiza master index.",
+        "L4_refresh": "Trigger: semanal. Re-embedding de todos los chunks con access_count > 0. Marca entradas con score < 0.3 por >30 días como stale."
+      }
+    },
+
+    "api_publica": {
+      "modulo": "memory_engine",
+      "entry_point": "src/memory_engine/__init__.py",
+
+      "clase_MemoryEngine": {
+        "metodos_publicos": [
+          {
+            "nombre": "__init__(supabase_client=None, base_path='~/.agents/memoria')",
+            "desc": "Inicializa el motor de memoria con conexión opcional a Supabase"
+          },
+          {
+            "nombre": "async flush(state: TeamState, metadata: dict) → str",
+            "desc": "Captura el estado actual del grafo y lo persiste en L1. Retorna session_id.",
+            "parametros": {
+              "state": "TeamState del pipeline",
+              "metadata": ["project", "topic", "tags", "model"]
+            }
+          },
+          {
+            "nombre": "async search(query: str, layers: list[int]=None, limit: int=5) → list[SearchResult]",
+            "desc": "Búsqueda híbrida cross-layer con RRF. Retorna resultados rankeados con metadatos de origen."
+          },
+          {
+            "nombre": "async consolidate(force: bool=False) → ConsolidationReport",
+            "desc": "Ejecuta consolidación L1→L2. Si force=True, también L2→L3."
+          },
+          {
+            "nombre": "get_session(session_id: str) → ChatFile | None",
+            "desc": "Recupera un chat completo por session_id (busca en L1 y L2)."
+          },
+          {
+            "nombre": "get_project(name: str) → ProjectDiary | None",
+            "desc": "Recupera el diario completo de un proyecto."
+          },
+          {
+            "nombre": "get_stats() → dict",
+            "desc": "Estadísticas de todas las capas: count por layer, tamaño total, últimas actividades."
+          }
+        ]
+      },
+
+      "funciones_independientes": {
+        "chat_logger": {
+          "async log_turn(session_id: str, role: str, content: str, metadata: dict) → None": "Añade un turno al chat activo. Si no existe sesión, la crea.",
+          "async close_session(session_id: str, summary: str=None) → str": "Cierra sesión: genera chunks, indexa, mueve a L2. Retorna ruta del archivo L2."
+        },
+        "search": {
+          "async hybrid_search(query: str, layers: list[int]=None, limit: int=5, k_rrf: int=60) → list[dict]": "Búsqueda híbrida principal. Usa fastembed local para embedding, consulta Supabase pgvector + BM25, aplica RRF fusion.",
+          "async keyword_search(query: str, layers: list[int]=None, limit: int=5) → list[dict]": "Búsqueda solo por keywords (BM25/TSVector). Útil cuando no hay conexión Supabase.",
+          "async semantic_search(query: str, layers: list[int]=None, limit: int=5) → list[dict]": "Búsqueda solo vectorial (cosine similarity)."
+        },
+        "project_manager": {
+          "merge(project_names: list[str], new_name: str) → ProjectDiary": "Combina múltiples proyectos en uno solo (carpeta macro). No modifica los originales.",
+          "fuse(project_names: list[str], new_name: str) → ProjectDiary": "Fusión real: reestructura entradas cronológicas, desduplica, combina resúmenes. Crea proyecto nuevo, los originales se marcan como fused.",
+          "split(project_name: str, topics: list[str]) → list[ProjectDiary]": "Divide un proyecto en sub-proyectos según tópicos. Cada entrada de diario se asigna al tópico más relevante."
+        },
+        "diary": {
+          "append_entry(project: str, entry: DiaryEntry) → None": "Añade entrada al diario del proyecto. Crea el proyecto si no existe.",
+          "get_diary(project: str) → ProjectDiary": "Obtiene el diario completo.",
+          "generate_summary(project: str) → str": "Genera/refina el resumen del proyecto desde todas las entradas del diario.",
+          "list_projects() → list[str]": "Lista todos los proyectos con diario."
+        },
+        "cli": {
+          "process": "Ejecuta procesamiento offline completo (L5).",
+          "status": "Muestra estado de todas las capas.",
+          "search <query>": "Búsqueda desde línea de comandos.",
+          "consolidate [--force]": "Ejecuta consolidación.",
+          "list [--project P] [--topic T] [--days N]": "Lista sesiones con filtros.",
+          "show <session_id>": "Muestra contenido completo de una sesión.",
+          "merge|fuse|split": "Operaciones de gestión de proyectos."
+        }
+      }
+    },
+
+    "archivos_del_paquete": {
+      "src/memory_engine/__init__.py": {
+        "propósito": "Entry point del paquete. Expone la clase MemoryEngine y las funciones principales.",
+        "dependencias": ["models.py", "naming.py", "chat_logger.py", "search.py", "diary.py", "indexer.py"],
+        "prioridad": 1,
+        "contenido_esperado": [
+          "from .models import MemoryEntry, ChatFile, SemanticChunk, IndexEntry, SearchResult, ConsolidationReport",
+          "from .naming import build_chat_filename, parse_chat_filename, validate_filename, next_version",
+          "from .chat_logger import ChatLogger",
+          "from .chunker import SemanticChunker",
+          "from .indexer import Indexer",
+          "from .search import HybridSearch",
+          "from .project_manager import ProjectManager",
+          "from .diary import DiaryManager",
+          "class MemoryEngine: orquestador de alto nivel que compone todos los submódulos"
+        ]
+      },
+
+      "src/memory_engine/models.py": {
+        "propósito": "Todos los dataclasses, tipos y esquemas de datos.",
+        "dependencias": ["ninguna (stdlib only)"],
+        "prioridad": 1,
+        "clases": [
+          "ChatFileName(namedtuple o dataclass): date, project, topic, version",
+          "ChatFile: filepath, frontmatter (dict), content (str), parsed_name (ChatFileName)",
+          "SemanticChunk: chunk_id, source_file, session_id, offset_chars, length_chars, content, summary, embedding, embedding_id",
+          "MemoryEntry: entry_id, layer, content, embedding, metadata",
+          "IndexEntry: index_id, chunk_id, session_id, layer, file_path, project, topic, tags, summary, embedding",
+          "SearchResult: content, layer, file_path, project, score, rrf_score, metadata",
+          "DiaryEntry: date, type, content, related_chats, tags",
+          "ProjectDiary: project_name, diary_path, entries",
+          "ConsolidationReport: consolidated_l1, new_chunks, new_index_entries, patterns_found, rules_generated, duration",
+          "MemoryStats: entries_by_layer, total_size_bytes, total_chunks, projects_count, last_consolidation"
+        ]
+      },
+
+      "src/memory_engine/naming.py": {
+        "propósito": "Sistema de nomenclatura: construcción, parseo, validación y auto-versión.",
+        "dependencias": ["models.py", "re (stdlib)", "pathlib (stdlib)"],
+        "prioridad": 1,
+        "funciones": [
+          "build_chat_filename(project, topic, date=None, version=1) → str: Construye nombre CHAT-YYYYMMDD-proyecto-tema-v{N}.md",
+          "parse_chat_filename(filename: str) → ChatFileName | None: Parsea nombre extrayendo date, project, topic, version",
+          "validate_filename(filename: str) → bool: Valida contra regex",
+          "next_version(base_dir: Path, project: str, topic: str, date: str) → int: Busca archivos existentes y retorna v+1",
+          "is_valid_project_name(name: str) → bool: Solo lowercase, números, guiones",
+          "normalize_project_name(name: str) → str: Convierte a kebab-case (ej: 'Mi Proyecto!' → 'mi-proyecto')",
+          "normalize_topic(name: str) → str: Convierte a kebab-case corto"
+        ]
+      },
+
+      "src/memory_engine/chat_logger.py": {
+        "propósito": "Escritura y lectura de archivos CHAT-*.md con frontmatter YAML.",
+        "dependencias": ["models.py", "naming.py", "yaml (6.0.3)", "frontmatter parsing manual (sin librería externa)"],
+        "prioridad": 2,
+        "clase_ChatLogger": {
+          "init(base_path)": "Configura directorio episodic/ y chats/",
+          "async create_session(project, topic, metadata) → str": "Crea archivo CHAT nuevo en episodic/ con estado in_progress. Retorna session_id.",
+          "async log_turn(session_id, role, content, metadata) → None": "Append al archivo de sesión activa. Formato: ## {role}\n\n{content}\n\n",
+          "async close_session(session_id, summary) → str": "Actualiza frontmatter a completed, añade summary. Mueve de episodic/ a chats/. Retorna path L2.",
+          "get_session(session_id) → ChatFile | None": "Lee archivo completo de sesión (busca en episodic/ y chats/).",
+          "list_sessions(project=None, topic=None, days=None) → list[ChatFile]": "Lista sesiones con filtros. Scanea chats/ y episodic/.",
+          "_ensure_dirs()": "Crea estructura de directorios",
+          "_read_frontmatter(path) → tuple[dict, str, int]": "Lee y parsea frontmatter YAML manualmente. Retorna (frontmatter, content, line_offset).",
+          "_write_frontmatter(path, frontmatter, content)": "Escribe archivo con frontmatter YAML."
+        },
+        "detalles_tecnicos": {
+          "formato_turno": "## {role}\n*{timestamp}*\n\n{content}\n\n---\n",
+          "limite_tamaño": "Si el archivo excede 500KB, se fuerza cierre de sesión y se abre una nueva (v{N+1})",
+          "auto_save": "Cada 5 turnos se actualiza el frontmatter con token_count, message_count, last_updated",
+          "concurrencia": "Usa file locking (fcntl o lockfile) para evitar corrupción por escritura concurrente"
+        }
+      },
+
+      "src/memory_engine/chunker.py": {
+        "propósito": "Chunking semántico del contenido de chats para indexación vectorial.",
+        "dependencias": ["models.py", "fastembed 0.8.0 (para embeddings)"],
+        "prioridad": 3,
+        "clase_SemanticChunker": {
+          "init(chunk_size=512, chunk_overlap=128)": "Configura chunk_size en tokens aproximados (chars/4).",
+          "chunk_text(text: str, session_id: str, source_file: str) → list[SemanticChunk]": "Divide texto en chunks semánticos. Usa párrafos como fronteras naturales.",
+          "chunk_chat_file(chat: ChatFile) → list[SemanticChunk]": "Chunking de archivo completo (sin frontmatter).",
+          "generate_summaries(chunks: list[SemanticChunk], llm=None) → list[SemanticChunk]": "Opcional: genera resumen de cada chunk usando LLM. Si no hay LLM, usa primeras N líneas."
+        },
+        "algoritmo_chunking": {
+          "pasos": [
+            "1. Dividir content en secciones por nivel de markdown (##, ###)",
+            "2. Para cada sección, medir tokens aproximados (len(text) / 4)",
+            "3. Si sección > chunk_size: subdividir por párrafos (doble newline)",
+            "4. Si párrafo > chunk_size: división por oraciones",
+            "5. Cada chunk: max chunk_size tokens, overlap de chunk_overlap tokens con el anterior",
+            "6. Preservar fronteras naturales (no cortar en medio de oración o bloque de código)"
+          ],
+          "overlap_strategy": "Incluir las últimas N líneas del chunk anterior como contexto (128 tokens aprox)"
+        }
+      },
+
+      "src/memory_engine/indexer.py": {
+        "propósito": "Generación de embeddings e indexación en Supabase pgvector + L4 local.",
+        "dependencias": ["models.py", "chunker.py", "supabase_utils.py (existente)", "fastembed 0.8.0"],
+        "prioridad": 3,
+        "clase_Indexer": {
+          "init(supabase_client=None, base_path)": "Inicializa con cliente Supabase opcional y ruta local.",
+          "async index_chunks(chunks: list[SemanticChunk], project: str, topic: str, tags: list) → list[str]": "Genera embeddings, inserta en Supabase pgvector y registra en L4 local. Retorna embedding_ids.",
+          "async index_session(session_id: str) → IndexReport": "Full pipeline: carga ChatFile, chunking, embedding, Supabase, L4. Usado en close_session().",
+          "async update_master_index(entries: list[IndexEntry]) → None": "Actualiza index.json local con nuevas entradas.",
+          "async rebuild_local_index() → IndexReport": "Reconstruye index.json completo desde Supabase + escaneo de disco.",
+          "search_local(query: str, limit: int) → list[IndexEntry]": "Búsqueda local en index.json (keyword match + fecha). Fallback cuando Supabase no está disponible."
+        },
+        "integracion_supabase": {
+          "tabla_principal": "agent_memory (existente) con task_type='memory_chunk'",
+          "tabla_nueva": "memory_index para L4 (ver esquema arriba)",
+          "funcion_rpc": "Reutilizar match_agent_memory existente para agent_memory. Crear match_memory_index para búsqueda cross-layer."
+        }
+      },
+
+      "src/memory_engine/search.py": {
+        "propósito": "Motor de búsqueda híbrida cross-layer con RRF.",
+        "dependencias": ["models.py", "indexer.py", "chat_logger.py", "diary.py", "supabase_utils.py (existente)", "fastembed 0.8.0"],
+        "prioridad": 3,
+        "clase_HybridSearch": {
+          "init(indexer, chat_logger, diary_manager)": "Composición de submódulos.",
+          "async hybrid_search(query, layers=None, limit=5, k_rrf=60) → list[SearchResult]": "Búsqueda principal.",
+          "async _search_supabase(query, layer_filter, limit) → list[dict]": "Búsqueda vectorial + BM25 en Supabase (reusa match_agent_memory o match_memory_index).",
+          "async _search_local(query, layers, limit) → list[dict]": "Búsqueda keyword en index.json + L0 + L1.",
+          "_rrf_fusion(results_by_source: dict[list], k: int) → list[SearchResult]": "Fusión Reciprocal Rank Fusion de múltiples fuentes."
+        },
+        "algoritmo_rrf": {
+          "formula": "score(d) = Σ_{s ∈ sources} (1 / (k + rank_s(d)))",
+          "k_default": 60,
+          "pasos": [
+            "1. Cada fuente (Supabase vectorial, Supabase BM25, L1 keywords, L0 keywords) produce ranking independiente",
+            "2. Para cada documento, calcular RRF score sumando 1/(k + rank) por cada fuente donde aparece",
+            "3. Ordenar por RRF score descendente",
+            "4. Limitar a top-K"
+          ],
+          "ponderacion": "Todas las fuentes tienen igual peso inicial. Opcional: weight_by_layer para dar más peso a L3 (proyectos) que a L1 (episodios)."
+        }
+      },
+
+      "src/memory_engine/project_manager.py": {
+        "propósito": "Gestión de proyectos: merge, fuse, split.",
+        "dependencias": ["models.py", "diary.py", "chat_logger.py", "naming.py"],
+        "prioridad": 4,
+        "clase_ProjectManager": {
+          "init(base_path, diary_manager)": "Configura path de proyectos.",
+          "merge(project_names, new_name) → ProjectDiary": "Crea carpeta macro que contiene referencias a los proyectos originales. No modifica datos.",
+          "fuse(project_names, new_name) → ProjectDiary": "Fusión real. Proceso: lee todos los diarios fuente, combina entradas cronológicamente, desduplica entradas similares (umbral > 0.85), re-asigna related_chats actualizando session_ids, genera nuevo resumen consolidado, marca proyectos originales como fused",
+          "split(project_name, topics) → list[ProjectDiary]": "Divide por tópico. Proceso: para cada entrada del diario asigna al tópico más relevante (keyword match), crea N proyectos nuevos cada uno con su diario, proyecto original queda como parent en frontmatter",
+          "list_projects() → list[dict]": "Lista con nombre, count de entradas, última actividad, estado (active|fused|split)."
+        }
+      },
+
+      "src/memory_engine/diary.py": {
+        "propósito": "Gestión de diarios de proyecto L3.",
+        "dependencias": ["models.py", "naming.py", "yaml 6.0.3"],
+        "prioridad": 4,
+        "clase_DiaryManager": {
+          "init(base_path)": "Configura path ~/.agents/memoria/proyectos/",
+          "async append_entry(project, entry: DiaryEntry) → None": "Append al diario del proyecto. Crea archivo si no existe.",
+          "async get_diary(project) → ProjectDiary": "Carga y parsea diario completo.",
+          "async generate_summary(project) → str": "Genera resumen usando LLM o template-based (si no hay LLM).",
+          "async add_chat_to_project(session_id, project) → None": "Registra un chat L2 como relacionado al proyecto.",
+          "list_projects() → list[str]": "Lista proyectos escaneando el directorio."
+        },
+        "formato_diario_md": {
+          "frontmatter": "---\nproject: agent-swarm\ncreated: 2026-01-15\nlast_updated: 2026-07-13\ntotal_entries: 47\nstatus: active\nfused_from: null\nparent_project: null\n---\n\n# Diario de Proyecto: agent-swarm\n\n## 2026-07-13\n\n### 🎯 Progress\n- Implementado memory engine L0-L2\n- 3 decisiones técnicas tomadas\n\n### 💡 Decisions\n- Se eligió fastembed sobre sentence-transformers por peso menor\n\n### 🚧 Blockers\n- Supabase connection intermitente, implementar fallback SQLite\n\n### 📎 Related Chats\n- CHAT-20260713-agent-swarm-memory-engine-v1.md\n"
+        }
+      },
+
+      "src/memory_engine/cli.py": {
+        "propósito": "Interfaz de línea de comandos para operaciones del memory engine.",
+        "dependencias": ["todos los módulos del paquete"],
+        "prioridad": 5,
+        "comandos": [
+          {"comando": "process", "desc": "Ejecuta L5: consolidación, indexación pendiente, minería, pruning. Args: --force, --dry-run"},
+          {"comando": "status", "desc": "Estado completo de todas las capas.", "flags": ["--json para output JSON"]},
+          {"comando": "search <query>", "desc": "Búsqueda híbrida.", "flags": ["--layer N (filtrar capa)", "--limit N", "--json"]},
+          {"comando": "consolidate", "desc": "Consolidación L1→L2.", "flags": ["--force (incluye L2→L3)"]},
+          {"comando": "list", "desc": "Listar sesiones.", "flags": ["--project P", "--topic T", "--days N", "--status S"]},
+          {"comando": "show <session_id>", "desc": "Mostrar contenido completo de sesión."},
+          {"comando": "project", "desc": "Operaciones de proyecto.", "subcomandos": [
+            "list: listar proyectos",
+            "show <name>: mostrar diario",
+            "merge <n1,n2> -o <name>: merge proyectos",
+            "fuse <n1,n2> -o <name>: fusión real",
+            "split <name> -t <topic1,topic2>: dividir proyecto"
+          ]},
+          {"comando": "reindex", "desc": "Reconstruir índice L4 desde cero.", "flags": ["--force"]}
+        ],
+        "integracion_con_main.py": {
+          "nuevos_flags": [
+            "--memory: Muestra estado del memory engine",
+            "--memory-process: Ejecuta procesamiento offline",
+            "--memory-search <query>: Búsqueda rápida desde terminal"
+          ]
+        }
+      }
+    },
+
+    "plan_de_implementacion": {
+      "orden_de_archivos": [
+        {
+          "paso": 1,
+          "archivos": ["src/memory_engine/models.py", "src/memory_engine/naming.py", "src/memory_engine/__init__.py (parcial)"],
+          "dependencias": [],
+          "descripcion": "Base del sistema: tipos de datos y sistema de nomenclatura. Sin dependencias externas (solo stdlib + yaml).",
+          "estimacion_horas": 2,
+          "tests_necesarios": [
+            "test_parse_chat_filename",
+            "test_build_chat_filename",
+            "test_next_version",
+            "test_validate_filename",
+            "test_normalize_project_name",
+            "test_normalize_topic",
+            "test_all_dataclass_constructors",
+            "test_memory_entry_serialization"
+          ]
+        },
+        {
+          "paso": 2,
+          "archivos": ["src/memory_engine/chat_logger.py"],
+          "dependencias": ["models.py", "naming.py"],
+          "descripcion": "Core de persistencia: escritura/lectura de archivos CHAT con frontmatter YAML. Auto-save, rotación por tamaño.",
+          "estimacion_horas": 3,
+          "tests_necesarios": [
+            "test_create_session_creates_file",
+            "test_log_turn_appends_content",
+            "test_close_session_updates_frontmatter",
+            "test_close_session_moves_to_chats",
+            "test_get_session_from_both_layers",
+            "test_list_sessions_with_filters",
+            "test_auto_rotate_on_size_limit",
+            "test_frontmatter_roundtrip",
+            "test_concurrent_write_safety"
+          ]
+        },
+        {
+          "paso": 3,
+          "archivos": ["src/memory_engine/chunker.py", "src/memory_engine/indexer.py"],
+          "dependencias": ["models.py", "chat_logger.py", "supabase_utils.py (existente)"],
+          "descripcion": "Indexación semántica: chunking con preservación de fronteras naturales + embeddings fastembed + Supabase pgvector + L4 local.",
+          "estimacion_horas": 4,
+          "tests_necesarios": [
+            "test_chunk_text_basic",
+            "test_chunk_preserves_code_blocks",
+            "test_chunk_respects_max_size",
+            "test_chunk_overlap",
+            "test_chunk_chat_file",
+            "test_index_chunks_generates_embeddings",
+            "test_index_session_full_pipeline",
+            "test_update_master_index",
+            "test_search_local_fallback",
+            "test_rebuild_local_index"
+          ]
+        },
+        {
+          "paso": 4,
+          "archivos": ["src/memory_engine/search.py"],
+          "dependencias": ["models.py", "indexer.py", "chat_logger.py", "supabase_utils.py (existente)"],
+          "descripcion": "Motor de búsqueda híbrida con RRF. Integra Supabase pgvector + BM25 + búsqueda local keyword.",
+          "estimacion_horas": 3,
+          "tests_necesarios": [
+            "test_hybrid_search_basic",
+            "test_rrf_fusion_balanced",
+            "test_rrf_fusion_with_gaps",
+            "test_search_cross_layer",
+            "test_search_with_layer_filter",
+            "test_search_fallback_when_supabase_down",
+            "test_keyword_search"
+          ]
+        },
+        {
+          "paso": 5,
+          "archivos": ["src/memory_engine/diary.py", "src/memory_engine/project_manager.py"],
+          "dependencias": ["models.py", "naming.py", "chat_logger.py"],
+          "descripcion": "Gestión de proyectos: diarios L3 + merge/fuse/split.",
+          "estimacion_horas": 3,
+          "tests_necesarios": [
+            "test_append_entry_creates_diary",
+            "test_get_diary_parses_correctly",
+            "test_generate_summary",
+            "test_merge_projects",
+            "test_fuse_projects_deduplicates",
+            "test_split_project_by_topics",
+            "test_list_projects",
+            "test_add_chat_to_project"
+          ]
+        },
+        {
+          "paso": 6,
+          "archivos": ["src/memory_engine/__init__.py (completar)"],
+          "dependencias": ["todos los anteriores"],
+          "descripcion": "Clase MemoryEngine que compone todos los submódulos. Integración con TeamState del grafo.",
+          "estimacion_horas": 2,
+          "tests_necesarios": [
+            "test_memory_engine_flush",
+            "test_memory_engine_search",
+            "test_memory_engine_consolidate",
+            "test_memory_engine_get_session",
+            "test_memory_engine_get_project",
+            "test_memory_engine_get_stats",
+            "test_integration_full_flow: flush → consolidate → search → verify"
+          ]
+        },
+        {
+          "paso": 7,
+          "archivos": ["src/memory_engine/cli.py"],
+          "dependencias": ["__init__.py completo"],
+          "descripcion": "CLI con argparse. Todos los comandos documentados.",
+          "estimacion_horas": 2,
+          "tests_necesarios": [
+            "test_cli_process",
+            "test_cli_status",
+            "test_cli_search",
+            "test_cli_list",
+            "test_cli_show",
+            "test_cli_project_commands",
+            "test_cli_reindex",
+            "test_cli_consolidate"
+          ]
+        },
+        {
+          "paso": 8,
+          "archivos": ["src/supabase_schema.sql (actualización)", "src/config.py (actualización opcional)"],
+          "dependencias": ["models.py (para esquemas)"],
+          "descripcion": "Actualización de esquema Supabase con nuevas tablas memory_index y memory_sessions.",
+          "estimacion_horas": 1,
+          "tests_necesarios": [
+            "test_supabase_new_tables_exist",
+            "test_match_memory_index_rpc",
+            "test_insert_memory_session"
+          ]
+        },
+        {
+          "paso": 9,
+          "archivos": ["main.py (actualización con nuevos flags)", "src/state.py (actualización opcional)"],
+          "dependencias": ["__init__.py completo"],
+          "descripcion": "Integración final: nuevos flags en CLI de main.py, hook en pipeline graph.py para flush automático.",
+          "estimacion_horas": 1
+        }
+      ],
+      "dependencias_entre_archivos": {
+        "grafo_dirigido": {
+          "models.py": [],
+          "naming.py": ["models.py"],
+          "chat_logger.py": ["models.py", "naming.py"],
+          "chunker.py": ["models.py"],
+          "indexer.py": ["models.py", "chunker.py", "chat_logger.py"],
+          "search.py": ["models.py", "indexer.py", "chat_logger.py", "diary.py", "chunker.py"],
+          "diary.py": ["models.py", "naming.py"],
+          "project_manager.py": ["models.py", "diary.py", "chat_logger.py", "naming.py"],
+          "__init__.py": ["todos"],
+          "cli.py": ["__init__.py"]
+        }
+      }
+    },
+
+    "dependencias_externas": {
+      "ya_instaladas": {
+        "fastembed>=0.8.0": "Embeddings locales (BAAI/bge-small-en-v1.5, 384d). Ya en el venv.",
+        "supabase>=2.0.0": "Cliente Supabase para pgvector. Ya en requirements.txt y venv.",
+        "pyyaml>=6.0": "Parseo de frontmatter YAML. Ya en el venv (yaml 6.0.3).",
+        "python-dotenv": "Variables de entorno. Ya en requirements.txt."
+      },
+      "nuevas_a_instalar": {
+        "ninguna": "Todas las dependencias necesarias ya están disponibles en el venv. El diseño usa solo stdlib + lo ya instalado."
+      },
+      "librerias_stdlib_usadas": [
+        "pathlib (manejo de rutas)",
+        "datetime (timestamps, fechas)",
+        "uuid (session_ids)",
+        "json (serialización index.json)",
+        "re (regex para nombres y chunking)",
+        "hashlib (fingerprints, IDs cortos)",
+        "sqlite3 (fallback local SQLite)",
+        "argparse (CLI)",
+        "dataclasses (modelos)",
+        "typing (tipos)",
+        "collections (defaultdict, OrderedDict)",
+        "threading/lockfile (concurrencia escritura)",
+        "os (manejo de archivos)"
+      ]
+    },
+
+    "edge_cases_y_manejo_de_errores": {
+      "archivo_corrupto": {
+        "problema": "Archivo CHAT con frontmatter YAML inválido o contenido truncado.",
+        "manejo": "chat_logger._read_frontmatter() detecta error de parseo, registra warning, retorna content completo con frontmatter={} y marca archivo como 'corrupted' en metadata."
+      },
+      "sesion_abierta_mucho_tiempo": {
+        "problema": "Sesión activa en L1 por >24h sin cerrar.",
+        "manejo": "L5 detecta sesiones con status=in_progress y updated_at > 24h. Cierra automáticamente con summary='Auto-cerrada por timeout'."
+      },
+      "concurrencia_en_escritura": {
+        "problema": "Dos agentes escribiendo al mismo archivo simultáneamente.",
+        "manejo": "File locking preventivo (fcntl.flock en Unix, msvcrt en Windows). Si el lock no se adquiere en 5s, se escribe a un archivo .pending.{uuid} para merge posterior."
+      },
+      "supabase_desconectado": {
+        "problema": "Supabase no responde (timeout, 503, schema no configurado).",
+        "manejo": "Indexer y Search tienen fallback a SQLite local (~/.agents/memoria/local.db) con tabla memory_index. El indexer guarda en cola local l2_pending_index para batch posterior."
+      },
+      "embedding_fallido": {
+        "problema": "fastembed falla por out-of-memory o modelo no descargado.",
+        "manejo": "Indexer detecta fallo, reintenta 1 vez, si persiste guarda chunk sin embedding y lo marca como 'pending_embedding'. L5 lo reintenta después."
+      },
+      "archivo_demasiado_grande": {
+        "problema": "Chat >10MB (miles de turnos).",
+        "manejo": "chat_logger fuerza rotación a v{N+1} al exceder 500KB. El chunker puede procesar archivos de hasta 50MB en streaming."
+      },
+      "nombre_de_archivo_duplicado": {
+        "problema": "Se genera CHAT con mismo nombre que uno existente (colisión).",
+        "manejo": "next_version() garantiza unicidad: busca el máximo v{N} existente para (fecha+proyecto+tema) y retorna N+1."
+      },
+      "proyecto_inexistente_en_split": {
+        "problema": "split() llamado sobre proyecto que no existe.",
+        "manejo": "ProjectManager.split() verifica existencia, lanza FileNotFoundError con mensaje claro listando proyectos disponibles."
+      },
+      "consolidacion_parcial": {
+        "problema": "Consolidación L1→L2 se interrumpe a mitad (crash, power loss).",
+        "manejo": "Patrón de rename atómico: se escribe archivo temporal .tmp, luego os.rename() (atómico en Unix). Si hay .tmp al iniciar, se completa la operación."
+      },
+      "rrf_sin_resultados": {
+        "problema": "Búsqueda híbrida sin resultados de ninguna fuente.",
+        "manejo": "search.py retorna lista vacía con metadata {total_results: 0, layers_queried: [...], query_preview: query[:100]}."
+      }
+    },
+
+    "decisiones_tecnicas": {
+      "D001": {
+        "decision": "Frontmatter YAML parseado manualmente (sin librería externa de frontmatter)",
+        "justificacion": "PyYAML ya está instalado. Solo necesitamos separar el bloque --- del contenido. Una función de 20 líneas usando regex r'^---\\s*\\n(.*?)\\n---\\s*\\n(.*)' es más ligera que añadir python-frontmatter o similar.",
+        "alternativa": "Usar python-frontmatter (1.1.1) — pero añade dependencia innecesaria."
+      },
+      "D002": {
+        "decision": "Chunking basado en tokens aproximados (chars/4) en lugar de tokenizer real",
+        "justificacion": "Evita dependencia con tiktoken u otros tokenizers. 1 token ~= 4 caracteres en inglés/es es una aproximación suficientemente buena para chunking. El modelo bge-small-en funciona bien con chunks de hasta 512 tokens.",
+        "precision": "±15% comparado con tokenizer real. Aceptable para chunking de búsqueda."
+      },
+      "D003": {
+        "decision": "SQLite como fallback local, no como almacenamiento primario",
+        "justificacion": "Supabase pgvector permite búsqueda híbrida real (cosine + BM25 + RRF). SQLite local es solo para operación offline y emergencia.",
+        "esquema_sqlite": "CREATE TABLE IF NOT EXISTS memory_index (id TEXT PRIMARY KEY, chunk_id TEXT, session_id TEXT, layer INT, file_path TEXT, project TEXT, topic TEXT, date TEXT, tags TEXT, summary TEXT, embedding BLOB, created_at TEXT); CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(content, session_id, project);"
+      },
+      "D004": {
+        "decision": "RRF con K=60 sin ponderación por capa",
+        "justificacion": "El valor K=60 es el estándar de la literatura (RREE de Cormack et al.). No ponderamos por capa porque el ranking natural del RRF ya favorece las fuentes que rankean un documento alto. Si se necesita afinación, se puede añadir weight_by_layer después.",
+        "referencia": "Cormack, G.V., Clarke, C.L.A., Buettcher, S. (2009). Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning Methods."
+      },
+      "D005": {
+        "decision": "session_id como UUID v4 de 24 chars con prefijo de capa",
+        "justificacion": "Prefijo: 'l1-' para episódicos, 'l2-' para chats históricos, 'lg-' para general. Facilita identificación visual y filtering sin consultar base de datos.",
+        "formato": "{prefix}{uuid4_hex[:22]} (ej: 'l2-a1b2c3d4e5f67890abcdef')"
+      },
+      "D006": {
+        "decision": "Consolidación L5 como tarea manual + cron opcional, no como demonio",
+        "justificacion": "Para un MVP, la simplicidad es clave. El usuario ejecuta 'python main.py --memory-process' cuando quiera, o un cron cada 6h. En futura iteración se puede convertir en demonio asyncio.",
+        "script_cron": "0 */6 * * * cd /Users/isabeldiaz/Dev/agent-swarm && .venv/bin/python3 -m src.memory_engine.cli process --quiet >> ~/.agents/memoria/processing/logs/cron.log 2>&1"
+      }
+    },
+
+    "plan_de_tests": {
+      "nivel_unitario": {
+        "archivo": "test_memory_engine_unit.py",
+        "tests_por_modulo": {
+          "models.py": 8,
+          "naming.py": 6,
+          "chat_logger.py": 9,
+          "chunker.py": 5,
+          "indexer.py": 6,
+          "search.py": 6,
+          "diary.py": 4,
+          "project_manager.py": 5
+        },
+        "total_estimado": 49
+      },
+      "nivel_integracion": {
+        "archivo": "test_memory_engine_integration.py",
+        "casos": [
+          "test_full_flow: flush → consolidate → search → get_session",
+          "test_indexing_pipeline: chat_file → chunk → embedding → supabase_insert",
+          "test_rrf_fusion_three_sources",
+          "test_merge_then_fuse",
+          "test_split_then_merge_back",
+          "test_supabase_fallback_to_sqlite",
+          "test_concurrent_write_lock",
+          "test_corrupted_file_recovery",
+          "test_large_file_rotation",
+          "test_cli_process_dry_run"
+        ],
+        "total_estimado": 10
+      },
+      "nivel_aceptacion": {
+        "escenarios": [
+          "Ejecutar pipeline completo con --memory flag, verificar que se crea archivo L1",
+          "Cerrar sesión, verificar que se mueve a L2 y se indexa en Supabase",
+          "Busqueda cross-layer que devuelve resultados de L0, L1, L2 y L3",
+          "Consolidación forzada que genera entrada nueva en diario de proyecto"
+        ]
+      },
+      "cobertura_objetivo": "≥ 85% line coverage (medido con pytest-cov)"
+    },
+
+    "metricas_de_exito": {
+      "tecnicas": [
+        "Tiempo de escritura L1 < 50ms por turno (archivo + frontmatter)",
+        "Tiempo de chunking + indexación < 2s para un chat de 100 turnos",
+        "Tiempo de búsqueda híbrida < 500ms para top-5 resultados",
+        "Consolidación L1→L2 < 1s por sesión",
+        "SQLite fallback search < 200ms",
+        "Tasa de éxito de embedding > 99% (reintentos incluidos)",
+        "Ratio de compresión de chunks: cada 512 tokens de entrada → 1 embedding de 384 floats (1536 bytes)"
+      ],
+      "de_negocio": [
+        "Reducción del 40% en repetición de errores ya resueltos (vs baseline sin memoria)",
+        "Tiempo de recuperación de contexto histórico < 3s (vs 30s+ sin el sistema)",
+        "Zero data loss en cortes de energía (atomic writes + recovery)"
+      ]
+    }
+  },
+
+  "notas": {
+    "disenio": [
+      "El blueprint asume que el lector conoce la base de código existente: TeamState, graph.py, supabase_utils.py, hierarchical_memory.py, episodic_memory.py.",
+      "Se integra con el sistema existente de 3 tiers (L1/L2/L3 de hierarchical_memory.py) pero los renombra y extiende a 6 capas. La clase HierarchicalMemory existente puede coexistir como wrapper legacy o ser reemplazada progresivamente.",
+      "No se añaden nuevas dependencias externas. Todo se implementa con stdlib + fastembed + supabase + pyyaml (ya instalados).",
+      "El sistema de archivos en disco (~/.agents/memoria/) es autocontenido y portable: se puede trasladar a otra máquina copiando el directorio.",
+      "La nomenclatura CHAT-*.md es compatible con herramientas de búsqueda existentes (grep, ripgrep, Spotlight, fzf).",
+      "El frontmatter YAML permite auto-descubrimiento: cualquier herramienta puede parsear metadatos sin conocer la estructura interna."
+    ],
+    "riesgos": [
+      "Dependencia de Supabase para búsqueda híbrida completa. Sin Supabase, la búsqueda es solo keyword (SQLite FTS5). Mitigación: cache local en index.json y SQLite FTS.",
+      "El chunking por chars/4 puede dar tamaños inconsistentes en Español (palabras más largas). Mitigación: usar límite en chars (2048 chars = ~512 tokens) permite consistencia independiente del idioma.",
+      "Concurrencia: dos instancias del agente escribiendo al mismo proyecto. Mitigación: lock por archivo + directorio .pending/ para operaciones fallidas."
+    ],
+    "proximo_pasos": [
+      "Paso 1: Implementar models.py + naming.py (sin dependencias externas, inmediatamente testeable)",
+      "Paso 2: Implementar chat_logger.py (core de persistencia)",
+      "Paso 3: Implementar chunker.py + indexer.py (indexación semántica)",
+      "Paso 4: Implementar search.py (búsqueda híbrida)",
+      "Paso 5: Implementar diary.py + project_manager.py (gestión de proyectos)",
+      "Paso 6: Completar __init__.py con MemoryEngine",
+      "Paso 7: Implementar cli.py",
+      "Paso 8: Tests de integración y actualización de Supabase schema",
+      "Paso 9: Integración con graph.py (hooks de flush()) y main.py (flags --memory)"
+    ]
+  },
+
+  "audit": {
+    "generado_por": "Arquitecto del Enjambre 4.0",
+    "fecha": "2026-07-13",
+    "proyecto": "agent-swarm",
+    "version_blueprint": "1.0.0",
+    "archivos_analizados": [
+      "src/state.py (TeamState actual)",
+      "src/graph.py (flujo del grafo)",
+      "src/episodic_memory.py (memoria episódica existente)",
+      "src/supabase_utils.py (utilidades Supabase + fastembed)",
+      "src/supabase_schema.sql (esquema pgvector actual)",
+      "src/config.py (configuración del pipeline)",
+      "src/agents/hierarchical_memory.py (memoria jerárquica 3-tier existente)",
+      "src/agents/smith.py (orquestador con sesiones)",
+      "main.py (punto de entrada)"
+    ],
+    "dependencias_verificadas": {
+      "fastembed": "0.8.0 (instalado en .venv)",
+      "supabase": "2.30.1 (instalado en .venv)",
+      "pyyaml": "6.0.3 (instalado en .venv)",
+      "sqlite3": "3.53.1 (stdlib)"
+    },
+    "directorios_creados": {
+      "src/memory_engine/": "Creado (vacío, listo para implementar)"
+    }
+  }
+}
