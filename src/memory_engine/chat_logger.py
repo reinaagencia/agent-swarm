@@ -110,7 +110,7 @@ class ChatLogger:
         self._update_general_index({
             "id": chat_id,
             "type": "chat",
-            "title": fm.get("summary", parsed["topic"]),
+            "title": fm.get("summary", parsed["project"]),
             "project": parsed["project"],
             "date": parsed["date"],
             "tags": fm.get("tags", []),
@@ -120,6 +120,9 @@ class ChatLogger:
             "file_path": str(file_path),
             "linked_to": fm.get("linked_chats", []),
         })
+
+        # ── Vector Store: embedding + pgvector ──
+        vector_result = self._vectorize(chat_id, content, chunks, fm, parsed)
 
         return {
             "chat_id": chat_id,
@@ -343,6 +346,78 @@ class ChatLogger:
         if len(compact) == 8 and compact.isdigit():
             return f"{compact[:4]}-{compact[4:6]}-{compact[6:]}"
         return compact
+
+    def _vectorize(self, chat_id: str, content: str, chunks: list, fm: dict, parsed: dict) -> dict:
+        """Genera embedding + guarda en pgvector.
+
+        Cada chunk del chat se vectoriza y almacena para búsqueda semántica.
+        El contenido completo se vectoriza como entrada principal.
+        """
+        result = {"status": "skipped", "chunks_indexed": 0}
+        try:
+            from src.memory_engine.embedding_service import EmbeddingService
+            from src.memory_engine.vector_store import VectorStore
+
+            emb = EmbeddingService()
+            store = VectorStore()
+
+            # 1. Insertar el contenido completo como registro principal
+            task_type = f"chat_{parsed['project']}"
+            full_text = content[:10000]  # Limitar a 10k chars
+
+            # Generar embedding del contenido principal
+            vector = emb.embed(full_text)
+            metadata = {
+                "chat_id": chat_id,
+                "project": parsed["project"],
+                "topic": parsed["topic"],
+                "tags": fm.get("tags", []),
+                "version": parsed["version"],
+                "type": "full_chat",
+            }
+            uid = store.insert(task_type, full_text, vector, metadata)
+
+            # 2. Insertar chunks individuales para búsqueda granular
+            indexed = 1 if uid else 0
+            if chunks:
+                for chunk in chunks:
+                    chunk_text = ""
+                    if hasattr(chunk, 'summary') and chunk.summary:
+                        chunk_text = chunk.summary
+                    elif isinstance(chunk, dict):
+                        chunk_text = chunk.get("summary", str(chunk))
+                    else:
+                        chunk_text = str(chunk)
+                    if len(chunk_text) < 20:
+                        continue
+                    chunk_vec = emb.embed(chunk_text)
+                    c_idx = chunk.index if hasattr(chunk, 'index') else (chunk.get("index", 0) if isinstance(chunk, dict) else 0)
+                    c_tstart = chunk.turn_start if hasattr(chunk, 'turn_start') else (chunk.get("turn_start", '?') if isinstance(chunk, dict) else '?')
+                    c_tend = chunk.turn_end if hasattr(chunk, 'turn_end') else (chunk.get("turn_end", '?') if isinstance(chunk, dict) else '?')
+                    chunk_meta = {
+                        "chat_id": chat_id,
+                        "project": parsed["project"],
+                        "topic": parsed["topic"],
+                        "chunk_index": c_idx,
+                        "turn_range": f"{c_tstart}-{c_tend}",
+                        "tags": fm.get("tags", []),
+                        "type": "chat_chunk",
+                    }
+                    cid = store.insert(f"chunk_{parsed['project']}", chunk_text, chunk_vec, chunk_meta)
+                    if cid:
+                        indexed += 1
+
+            store.close()
+            result = {"status": "ok", "chunks_indexed": indexed}
+        except ImportError as e:
+            result = {"status": "unavailable", "error": str(e)}
+        except Exception as e:
+            result = {"status": "error", "error": str(e)}
+
+        if result["status"] != "ok":
+            print(f"  ⚠️ [VectorStore] {result.get('error', 'unknown')}")
+
+        return result
 
     def _update_general_index(self, entry: dict):
         """Actualiza el índice general maestro (L4)."""
