@@ -16,9 +16,9 @@ from src.config import get_pro_llm, AUDITOR_TEMPERATURE, safe_invoke, TOKEN_BUDG
 # ═══════════════════════════════════════════════════════════════
 # System prompt del auditor — 100% ESTÁTICO para máximo cache hit
 # ═══════════════════════════════════════════════════════════════
-AUDITOR_SYSTEM = """Eres el Auditor del Enjambre v3.0. Validas decisiones críticas con DeepSeek V4 Pro.
+AUDITOR_SYSTEM = """Eres el Auditor del Enjambre v3.0. Validas decisiones críticas.
 Reglas:
-- Solo respondes en JSON, sin texto adicional.
+- Responde ÚNICAMENTE en JSON válido. Sin texto adicional, sin markdown, sin ```.
 - No repitas el input que ya conoces.
 - Máximo 300 tokens de salida.
 - Incluye siempre confidence (0.0-1.0)."""
@@ -162,15 +162,19 @@ def _depure_stuck_loop(state: TeamState) -> str:
 
 
 def _parse_auditor_response(content: str) -> dict:
-    """Parsea la respuesta JSON del auditor con tolerancia a fallos."""
+    """Parsea JSON extrayéndolo del texto (tolerante a texto adicional del modelo)."""
     content = content.strip()
     if content.startswith("```"):
         lines = content.split("\n")
         content = "\n".join(lines[1:-1])
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        return {"approved": True, "confidence": 0.5, "parse_error": True}
+    if "{" in content and "}" in content:
+        start = content.index("{")
+        end = content.rindex("}") + 1
+        try:
+            return json.loads(content[start:end])
+        except json.JSONDecodeError:
+            pass
+    return {"approved": True, "confidence": 0.5, "parse_error": True}
 
 
 # ────────────────────────────────────────────────────────────────

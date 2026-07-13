@@ -101,6 +101,14 @@ class TeamState(TypedDict):
     """Lista de blueprints generados por el ensemble de arquitectura.
     Gate 2 los analiza y elige el mejor. Cada entrada es un dict con blueprint."""
 
+    # ── Micro-gates (validaciones Pro con output mínimo) ──
+    micro_gates: dict
+    """Resultados de los micro-gates de validación Pro.
+    Estructura: {"M1_design": {"decision": "PASS", "confidence": 0.95, "reason": "..."},
+                 "M2_code_triage": {...}, "M3_plan_eval": {...},
+                 "M4_risk": {...}, "M5_reflection": {...}}
+    Cada micro-gate produce JSON con ~40 tokens de output a costo ~$0.0036."""
+
     # ── Flags internos del grafo ──
     _entry_decision: Optional[str]
     """Decisión del router de entrada: 'meta_planner' o 'parallel_prep'."""

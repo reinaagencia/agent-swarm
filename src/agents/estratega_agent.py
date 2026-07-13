@@ -28,7 +28,7 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.config import get_llm, get_budget, TEMPERATURE_CREATIVE
+from src.config import get_nemotron_llm as get_llm, get_budget, TEMPERATURE_CREATIVE
 from src.token_juice import compress
 from langchain_core.messages import HumanMessage, SystemMessage
 

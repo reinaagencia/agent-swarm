@@ -344,6 +344,13 @@ async def instalar(proyecto: str, accion: str = "setup") -> dict:
 
 def main():
     """CLI entry point."""
+    # ── Trackear actividad ──
+    try:
+        from src.agent_tracker import mark_active, mark_idle
+        mark_active("instalador")
+    except Exception:
+        pass
+
     if len(sys.argv) > 1:
         try:
             data = json.loads(sys.argv[1])
@@ -366,6 +373,11 @@ def main():
     
     result = asyncio.run(instalar(proyecto, accion=accion))
     print(json.dumps(result, ensure_ascii=False, indent=2))
+
+    try:
+        mark_idle("instalador")
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

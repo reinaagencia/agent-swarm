@@ -252,11 +252,15 @@ class ModelRouter:
         
         if model_type == "pro":
             temperature = 0.15
-            max_tokens = 1024  # Pro se usa para análisis concisos
+            # Pro para el programador → 8192 (generar código completo)
+            # Pro para otros nodos → 1024 (análisis concisos)
+            max_tokens = 8192 if nodo == "Programador" else 1024
         else:
             temp_map = temps["flash"]
             temperature = temp_map.get(nodo, temp_map["default"])
-            max_tokens = 4096 if nodo == "Programador" else 1024
+            # Flash para el programador → 8192 (evitar código truncado)
+            # Flash para otros nodos → 1024 (análisis concisos)
+            max_tokens = 8192 if nodo == "Programador" else 1024
         
         return (model_type, temperature, max_tokens)
     

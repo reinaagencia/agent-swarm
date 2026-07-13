@@ -29,6 +29,9 @@ from src.config import (
 )
 from src.model_router import get_router, reset_router
 
+# ── Agent Tracker (estado en tiempo real) ──
+from src.agent_tracker import wrap_node, reset as reset_tracker
+
 # ── Nodos ──
 from src.nodes.parallel_prep import parallel_prep_node
 from src.nodes.meta_planner import meta_planner_node  # 🆕 Gate 0 v3.0
@@ -47,6 +50,13 @@ from src.nodes.auditor_gate import (
     auditor_gate_stuck_loop,
     should_proceed_after_auditor,
 )
+
+# ── Micro-Gates (validación Pro con output mínimo) ──
+from src.nodes.micro_gate_design import micro_gate_design
+from src.nodes.micro_gate_triage import micro_gate_triage       # 🆕 M2
+from src.nodes.micro_gate_plan import micro_gate_plan           # 🆕 M3
+from src.nodes.micro_gate_risk import micro_gate_risk           # 🆕 M4
+from src.nodes.micro_gate_reflection import micro_gate_reflection  # 🆕 M5
 
 
 def _compute_fingerprint(source_code: dict) -> str:
@@ -242,21 +252,29 @@ def build_graph() -> StateGraph:
         decision = should_use_gate_0(state)
         return {"_entry_decision": decision}
     
-    # ── Agregar nodos ──
-    workflow.add_node("entry_router", entry_router)             # 🆕 Router de entrada
-    workflow.add_node("meta_planner", meta_planner_node)       # 🆕 Gate 0 v3.0
-    workflow.add_node("parallel_prep", parallel_prep_node)
-    workflow.add_node("orchestrator", orchestrator_node)
-    workflow.add_node("auditor_gate_1", auditor_gate_viability)
-    workflow.add_node("architect", architect_node)
-    workflow.add_node("auditor_gate_2", auditor_gate_architecture)
-    workflow.add_node("architect_redesign", architect_redesign_node)
-    workflow.add_node("programmer", programmer_node)
-    workflow.add_node("tester", parallel_tester_node)
-    workflow.add_node("auditor_gate_3", auditor_gate_stuck_loop)
-    workflow.add_node("knowledge_extractor", knowledge_extractor_node)
-    workflow.add_node("fail_diagnosis", fail_diagnosis_node)
-    workflow.add_node("reflection", reflection_node)  # 🧠 Ciclo RL
+    # ── Reset tracker al inicio de cada ejecución ──
+    reset_tracker()
+
+    # ── Agregar nodos (envueltos con tracking de estado) ──
+    workflow.add_node("entry_router", wrap_node("entry_router")(entry_router))             # 🆕 Router de entrada
+    workflow.add_node("meta_planner", wrap_node("meta_planner")(meta_planner_node))       # 🆕 Gate 0 v3.0
+    workflow.add_node("parallel_prep", wrap_node("parallel_prep")(parallel_prep_node))
+    workflow.add_node("orchestrator", wrap_node("orchestrator")(orchestrator_node))
+    workflow.add_node("auditor_gate_1", wrap_node("auditor_gate_1")(auditor_gate_viability))
+    workflow.add_node("architect", wrap_node("architect")(architect_node))
+    workflow.add_node("micro_gate_design", wrap_node("micro_gate_design")(micro_gate_design))   # 🆕 M1
+    workflow.add_node("micro_gate_triage", wrap_node("micro_gate_triage")(micro_gate_triage))       # 🆕 M2
+    workflow.add_node("micro_gate_plan", wrap_node("micro_gate_plan")(micro_gate_plan))           # 🆕 M3
+    workflow.add_node("micro_gate_risk", wrap_node("micro_gate_risk")(micro_gate_risk))           # 🆕 M4
+    workflow.add_node("micro_gate_reflection", wrap_node("micro_gate_reflection")(micro_gate_reflection))  # 🆕 M5
+    workflow.add_node("auditor_gate_2", wrap_node("auditor_gate_2")(auditor_gate_architecture))
+    workflow.add_node("architect_redesign", wrap_node("architect_redesign")(architect_redesign_node))
+    workflow.add_node("programmer", wrap_node("programmer")(programmer_node))
+    workflow.add_node("tester", wrap_node("tester")(parallel_tester_node))
+    workflow.add_node("auditor_gate_3", wrap_node("auditor_gate_3")(auditor_gate_stuck_loop))
+    workflow.add_node("knowledge_extractor", wrap_node("knowledge_extractor")(knowledge_extractor_node))
+    workflow.add_node("fail_diagnosis", wrap_node("fail_diagnosis")(fail_diagnosis_node))
+    workflow.add_node("reflection", wrap_node("reflection")(reflection_node))  # 🧠 Ciclo RL
 
     # ── ENTRY POINT → Router de entrada ──
     workflow.set_entry_point("entry_router")
@@ -278,9 +296,10 @@ def build_graph() -> StateGraph:
     # ── Flujo principal ──
     workflow.add_edge("parallel_prep", "orchestrator")
     
-    # OPTIMIZACIÓN P0: Gate 1 se salta si Meta-Planner ya validó viabilidad
+    # Orquestador → M3 (eval plan) → Gate 1 (o arquitecto si fusionado)
+    workflow.add_edge("orchestrator", "micro_gate_plan")
     workflow.add_conditional_edges(
-        "orchestrator",
+        "micro_gate_plan",
         lambda s: "architect" if s.get("meta_planner_fused") else "auditor_gate_1",
         {"auditor_gate_1": "auditor_gate_1", "architect": "architect"},
     )
@@ -292,18 +311,23 @@ def build_graph() -> StateGraph:
         {"architect": "architect", "end": END},
     )
 
-    # Arquitecto → Gate 2 (condicional, con router) → Programador
+    # Arquitecto → M1 (validación de diseño) → Gate 2 (condicional) → Programador
+    workflow.add_edge("architect", "micro_gate_design")
+    
+    # M1 → Gate 2 (condicional, con router) → Programador
     workflow.add_conditional_edges(
-        "architect",
+        "micro_gate_design",
         should_audit_architecture,
         {"auditor_gate_2": "auditor_gate_2", "programmer": "programmer"},
     )
     workflow.add_edge("auditor_gate_2", "programmer")
 
-    # Programador → Tester
-    workflow.add_edge("programmer", "tester")
+    # Programador → M2 (triage código) → Tester
+    workflow.add_edge("programmer", "micro_gate_triage")
+    workflow.add_edge("micro_gate_triage", "tester")
 
     # Tester → (varios destinos con cortocircuito de bucle)
+    # NOTA: Cuando tests PASS, se redirige a M4 (Risk Assessment) antes del extractor
     workflow.add_conditional_edges(
         "tester",
         should_retry,
@@ -311,14 +335,29 @@ def build_graph() -> StateGraph:
             "auditor_gate_3": "auditor_gate_3",
             "architect_redesign": "architect_redesign",
             "programmer": "programmer",
-            "knowledge_extractor": "knowledge_extractor",
+            "knowledge_extractor": "micro_gate_risk",  # 🆕 M4 antes de extractor
             "fail_diagnosis": "fail_diagnosis",
             END: END,
         },
     )
+    # M4 (Risk) → Extractor
+    workflow.add_edge("micro_gate_risk", "knowledge_extractor")
 
-    # Gate 3 → Programador (desbloqueo)
-    workflow.add_edge("auditor_gate_3", "programmer")
+    # Gate 3 → rediseño (si recomienda reiniciar) o programador (desbloqueo simple)
+    def should_restart_or_continue(state: TeamState) -> str:
+        """Si Gate 3 recomienda reiniciar, va a arquitect_redesign."""
+        scratchpad = state.get("scratchpad", [])
+        for entry in scratchpad:
+            if "Gate 3" in entry and ("reiniciar" in entry.lower() or "restart" in entry.lower()):
+                print(f"[Router] 🔄 Gate 3 recomienda REINICIAR → architect_redesign")
+                return "architect_redesign"
+        return "programmer"
+    
+    workflow.add_conditional_edges(
+        "auditor_gate_3",
+        should_restart_or_continue,
+        {"architect_redesign": "architect_redesign", "programmer": "programmer"},
+    )
 
     # Rediseño → Programador
     workflow.add_edge("architect_redesign", "programmer")
@@ -329,8 +368,9 @@ def build_graph() -> StateGraph:
     # Extractor → Reflection (Ciclo RL)
     workflow.add_edge("knowledge_extractor", "reflection")
 
-    # Reflection → END (cierra el ciclo)
-    workflow.add_edge("reflection", END)
+    # Reflection → M5 (ruta de reflexión) → END
+    workflow.add_edge("reflection", "micro_gate_reflection")
+    workflow.add_edge("micro_gate_reflection", END)
 
     return workflow.compile()
 

@@ -330,6 +330,13 @@ async def _verificar_proyecto(proyecto_path: str) -> dict:
 
 def main():
     """CLI entry point."""
+    # ── Trackear actividad ──
+    try:
+        from src.agent_tracker import mark_active, mark_idle
+        mark_active("desplegador")
+    except Exception:
+        pass
+
     if len(sys.argv) > 1:
         try:
             data = json.loads(sys.argv[1])
@@ -354,6 +361,11 @@ def main():
     
     result = asyncio.run(desplegar(proyecto, entorno=entorno, mensaje=mensaje, verificar=verificar))
     print(json.dumps(result, ensure_ascii=False, indent=2))
+
+    try:
+        mark_idle("desplegador")
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

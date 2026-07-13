@@ -182,10 +182,11 @@ class SessionManager:
             "status": "saved",
             "chat_id": self.current_chat_id,
             "project": self.current_project,
-            "duration": duration_str,
-            "chat_saved": chat_result,
-            "diary_updated": diary_result,
-            "index_entries": index_result.get("entries_count", 0),
+        "duration": duration_str,
+        "chat_saved": chat_result,
+        "diary_updated": diary_result,
+        "index_entries": index_result.get("entries_count", 0),
+        "config": {"supabase": "local", "pgvector": True, "embedding_dims": 384},
         }
 
         self._reset()
